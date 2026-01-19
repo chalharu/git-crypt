@@ -861,6 +861,7 @@ dependencies = [
  "clap",
  "git2",
  "pgp",
+ "thiserror",
 ]
 
 [[package]]

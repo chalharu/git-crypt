@@ -1,3 +1,5 @@
+use std::env::current_dir;
+
 use clap::{Parser, Subcommand};
 
 #[derive(Parser, Clone, Debug)]
@@ -49,6 +51,8 @@ pub enum Commands {
     PreAutoGc,
     /// git clean/smudgeのprocessコマンド
     Process,
+    /// 開発用テストコマンド
+    Test,
 }
 
 fn main() {
@@ -97,5 +101,36 @@ fn main() {
             // TODO: Implement debug trace output
             println!("Processing...");
         }
+        Commands::Test => {
+            println!("{:?}", load_git_config());
+        }
     }
+}
+
+#[derive(Debug, thiserror::Error)]
+enum Error {
+    #[error("Failed to load git configuration")]
+    GitConfigError(#[from] git2::Error),
+    #[error("IO error occurred")]
+    IoError(#[from] std::io::Error),
+}
+
+#[derive(Debug)]
+struct GitConfig {
+    public_key: String,
+    private_key: String,
+}
+
+// gitの設定を読み込む関数
+fn load_git_config() -> Result<GitConfig, Error> {
+    let repo = git2::Repository::open(current_dir()?)?;
+    let config = repo.config()?;
+
+    let public_key = config.get_string("git-crypt.public-key")?;
+    let private_key = config.get_string("git-crypt.private-key")?;
+
+    Ok(GitConfig {
+        public_key,
+        private_key,
+    })
 }
