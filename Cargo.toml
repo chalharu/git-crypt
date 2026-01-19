@@ -7,4 +7,5 @@ edition = "2024"
 clap = { version = "4.5.54", features = ["derive"] }
 git2 = "0.20.3"
 pgp = "0.18.0"
+rand = "0.8.5" # pgpで使われているrandのバージョンが0.8.5のため、合わせる必要がある。
 thiserror = "2.0.18"
