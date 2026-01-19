@@ -1,6 +1,7 @@
-use std::env::current_dir;
+use std::{env::current_dir, fs};
 
 use clap::{Parser, Subcommand};
+use pgp::composed::{Deserializable as _, SignedPublicKey, SignedSecretKey};
 
 #[derive(Parser, Clone, Debug)]
 struct Cli {
@@ -102,7 +103,10 @@ fn main() {
             println!("Processing...");
         }
         Commands::Test => {
-            println!("{:?}", load_git_config());
+            let config = load_git_config().expect("Failed to load git config");
+            let keypair = KeyPair::try_from(config).expect("Failed to create keypair");
+
+            println!("{:?}", keypair);
         }
     }
 }
@@ -113,6 +117,46 @@ enum Error {
     GitConfigError(#[from] git2::Error),
     #[error("IO error occurred")]
     IoError(#[from] std::io::Error),
+    #[error("PGP error occurred")]
+    PgpError(#[from] pgp::errors::Error),
+}
+
+#[derive(Debug)]
+struct KeyPair {
+    public_key: SignedPublicKey,
+    private_key: SignedSecretKey,
+}
+
+impl TryFrom<GitConfig> for KeyPair {
+    type Error = Error;
+    fn try_from(config: GitConfig) -> Result<Self, Error> {
+        let public_key = read_public_key(&fs::read(config.public_key)?)?;
+        let private_key = read_secret_key(&fs::read(config.private_key)?)?;
+        Ok(KeyPair {
+            public_key,
+            private_key,
+        })
+    }
+}
+
+/// Parse private key from either armored or binary format
+fn read_secret_key(input: &[u8]) -> Result<SignedSecretKey, Error> {
+    let (key, _headers) = SignedSecretKey::from_reader_single(input)?;
+
+    // Check that the binding self-signatures for each component are valid
+    key.verify()?;
+
+    Ok(key)
+}
+
+/// Parse public key from either armored or binary format
+fn read_public_key(input: &[u8]) -> Result<SignedPublicKey, Error> {
+    let (cert, _headers) = SignedPublicKey::from_reader_single(input)?;
+
+    // Check that the binding self-signatures for each component are valid
+    cert.verify()?;
+
+    Ok(cert)
 }
 
 #[derive(Debug)]
