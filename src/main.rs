@@ -376,10 +376,10 @@ fn encrypt(
         // hash-objectの書き込みに成功した場合のみrefを更新
         // 失敗した場合でも出力自体は成功しているため、処理は継続
         let raw_ref = format!("refs/crypt-cache/decrypt/{}", encrypt_obj_oid);
-        repo.repo
-            .reference(&encrypt_ref, encrypt_obj_oid, true, "Update encrypt cache")?;
-        repo.repo
-            .reference(&raw_ref, oid, true, "Update decrypt cache")?;
+        let _ = repo.repo
+            .reference(&encrypt_ref, encrypt_obj_oid, true, "Update encrypt cache");
+        let _ = repo.repo
+            .reference(&raw_ref, oid, true, "Update decrypt cache");
     }
 
     Ok(encrypted.as_bytes().to_vec())
@@ -387,8 +387,7 @@ fn encrypt(
 
 fn decrypt(key_pair: &KeyPair, data: &[u8], repo: &mut GitRepository) -> Result<Vec<u8>, Error> {
     let Ok((message, _)) = Message::from_armor(data) else {
-        // Messageオブジェクトに変換できない場合 = 暗号化されていない場合はそのまま出力
-        eprintln!("Not a PGP message, outputting raw data");
+        // Messageオブジェクトに変換できない場合 = 暗号化されていない場合、パケットが壊れている場合はそのまま出力
         return Ok(data.to_vec());
     };
     if !message.is_encrypted() {
@@ -433,11 +432,11 @@ fn decrypt(key_pair: &KeyPair, data: &[u8], repo: &mut GitRepository) -> Result<
 
     // キャッシュ化
     if let Ok(decrypt_obj_oid) = repo.repo.blob(decrypted_bytes.as_slice()) {
-        let encrypt_ref = format!("refs/crypt-cache/encrypt/{}", oid);
-        repo.repo
-            .reference(&decrypt_ref, decrypt_obj_oid, true, "Update decrypt cache")?;
-        repo.repo
-            .reference(&encrypt_ref, oid, true, "Update encrypt cache")?;
+        let encrypt_ref = format!("refs/crypt-cache/encrypt/{}", decrypt_obj_oid);
+        let _ = repo.repo
+            .reference(&encrypt_ref, oid, true, "Update encrypt cache");
+        let _ = repo.repo
+            .reference(&decrypt_ref, decrypt_obj_oid, true, "Update decrypt cache");
     }
     Ok(decrypted_bytes)
 }
