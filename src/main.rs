@@ -93,8 +93,10 @@ fn main() {
             }
         }
         Commands::Textconv { file_path } => {
-            // TODO: Implement debug trace output
-            println!("Text converting file: {}", file_path);
+            if let Err(e) = textconv(Path::new(&file_path)) {
+                eprintln!("Error during textconv: {}", e);
+                std::process::exit(1);
+            }
         }
         Commands::Merge {
             base,
@@ -326,11 +328,11 @@ fn encrypt(
         };
     };
 
-    if let Ok(message) = Message::from_bytes(data) {
-        if config.is_encrypted_by_key(&message)? {
-            // すでに指定されたキーIDに一致する公開鍵で暗号化されている場合、そのまま出力
-            return Ok(data.to_vec());
-        }
+    if let Ok(message) = Message::from_bytes(data)
+        && config.is_encrypted_by_key(&message)?
+    {
+        // すでに指定されたキーIDに一致する公開鍵で暗号化されている場合、そのまま出力
+        return Ok(data.to_vec());
     }
 
     // インデックスの内容を取得して復号化を試みる
@@ -484,4 +486,18 @@ fn decrypt(
             .reference(&decrypt_ref, decrypt_obj_oid, true, "Update decrypt cache");
     }
     Ok(decrypted_bytes)
+}
+
+fn textconv(path: &Path) -> Result<(), Error> {
+    let mut repo = GitRepository::new()?;
+
+    let mut config = load_git_config(&repo)?;
+    let keypair = KeyPair::try_from(&config)?;
+
+    let data = fs::read(path)?;
+
+    let decrypted = decrypt(&keypair, &data, &mut repo, path, &mut config)?;
+    std::io::stdout().write_all(&decrypted)?;
+
+    Ok(())
 }
