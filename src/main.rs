@@ -34,7 +34,11 @@ pub enum Commands {
         file_path: String,
     },
     /// git smudgeフィルタ用コマンド
-    Smudge,
+    Smudge {
+        /// ファイルパス
+        #[arg(index = 1)]
+        file_path: String,
+    },
     /// git textconvフィルタ用コマンド
     Textconv {
         /// ファイルパス
@@ -82,8 +86,8 @@ fn main() {
                 std::process::exit(1);
             }
         }
-        Commands::Smudge => {
-            if let Err(e) = smudge() {
+        Commands::Smudge { file_path } => {
+            if let Err(e) = smudge(Path::new(&file_path)) {
                 eprintln!("Error during smudge: {:?}", e);
                 std::process::exit(1);
             }
@@ -281,7 +285,7 @@ fn clean(path: &Path) -> Result<(), Error> {
     Ok(())
 }
 
-fn smudge() -> Result<(), Error> {
+fn smudge(path: &Path) -> Result<(), Error> {
     let mut repo = GitRepository::new()?;
 
     let mut config = load_git_config(&repo)?;
@@ -290,7 +294,7 @@ fn smudge() -> Result<(), Error> {
     let mut data = Vec::new();
     std::io::stdin().lock().read_to_end(&mut data)?;
 
-    let decrypted = decrypt(&keypair, &data, &mut repo, &mut config)?;
+    let decrypted = decrypt(&keypair, &data, &mut repo, path, &mut config)?;
     std::io::stdout().write_all(&decrypted)?;
 
     Ok(())
@@ -411,11 +415,19 @@ fn decrypt(
     key_pair: &KeyPair,
     data: &[u8],
     repo: &mut GitRepository,
+    path: &Path,
     config: &mut GitConfig,
 ) -> Result<Vec<u8>, Error> {
-    let Ok((message, _)) = Message::from_armor(data) else {
-        // Messageオブジェクトに変換できない場合 = 暗号化されていない場合、パケットが壊れている場合はそのまま出力
-        return Ok(data.to_vec());
+    let message = match Message::from_armor(data) {
+        Ok((msg, _)) => msg,
+        Err(e) => {
+            // パケットが不正 = 暗号化されていない場合はそのまま出力
+            // 本来は平文と破損を区別したいが、現状では区別できないためそのまま出力
+            if config.is_encryption(path).unwrap_or(false) {
+                eprintln!("Not a valid PGP message ({:?}), outputting raw data", e);
+            }
+            return Ok(data.to_vec());
+        }
     };
     if !message.is_encrypted() {
         // 暗号化されていない場合はそのまま出力
