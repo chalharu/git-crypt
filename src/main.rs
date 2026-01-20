@@ -8,7 +8,7 @@ use std::{
 use clap::{Parser, Subcommand};
 use pgp::{
     composed::{
-        ArmorOptions, DecryptionOptions, Deserializable as _, Message, MessageBuilder,
+        ArmorOptions, DecryptionOptions, Deserializable as _, Esk, Message, MessageBuilder,
         SignedPublicKey, SignedSecretKey, TheRing,
     },
     crypto::sym::SymmetricKeyAlgorithm,
@@ -202,6 +202,26 @@ impl GitConfig {
         Ok(regex.is_match(path.to_str().unwrap_or_default()))
     }
 
+    fn is_encrypted_by_key(&mut self, message: &Message) -> Result<bool, Error> {
+        if let Some(key_id) = self.encryption_key_id()? {
+            if let Message::Encrypted { esk, .. } = message {
+                for e in esk.iter() {
+                    if let Esk::PublicKeyEncryptedSessionKey(pubkey) = e
+                        && let Ok(id) = pubkey.id()
+                        && id.as_ref().iter().eq(key_id.iter())
+                    {
+                        // 指定されたキーIDに一致する公開鍵で暗号化されている場合、そのまま出力
+                        return Ok(true);
+                    }
+                }
+            }
+        } else {
+            // キーIDが指定されていない場合、すでに暗号化されているならそのまま出力
+            return Ok(message.is_encrypted());
+        }
+        Ok(false)
+    }
+
     fn encryption_key_id(&mut self) -> Result<Option<&[u8]>, Error> {
         if self.encryption_key_id_vec.is_none() {
             if let Some(ref encryption_key_id) = self.encryption_key_id {
@@ -303,10 +323,11 @@ fn encrypt(
     };
 
     if let Ok(message) = Message::from_bytes(data)
-        && message.is_encrypted()
     {
-        // すでに暗号化されている場合はそのまま出力
-        return Ok(data.to_vec());
+        if config.is_encrypted_by_key(&message)? {
+            // すでに指定されたキーIDに一致する公開鍵で暗号化されている場合、そのまま出力
+            return Ok(data.to_vec());
+        }
     }
 
     // インデックスの内容を取得して復号化を試みる
@@ -376,9 +397,11 @@ fn encrypt(
         // hash-objectの書き込みに成功した場合のみrefを更新
         // 失敗した場合でも出力自体は成功しているため、処理は継続
         let raw_ref = format!("refs/crypt-cache/decrypt/{}", encrypt_obj_oid);
-        let _ = repo.repo
+        let _ = repo
+            .repo
             .reference(&encrypt_ref, encrypt_obj_oid, true, "Update encrypt cache");
-        let _ = repo.repo
+        let _ = repo
+            .repo
             .reference(&raw_ref, oid, true, "Update decrypt cache");
     }
 
@@ -433,9 +456,11 @@ fn decrypt(key_pair: &KeyPair, data: &[u8], repo: &mut GitRepository) -> Result<
     // キャッシュ化
     if let Ok(decrypt_obj_oid) = repo.repo.blob(decrypted_bytes.as_slice()) {
         let encrypt_ref = format!("refs/crypt-cache/encrypt/{}", decrypt_obj_oid);
-        let _ = repo.repo
+        let _ = repo
+            .repo
             .reference(&encrypt_ref, oid, true, "Update encrypt cache");
-        let _ = repo.repo
+        let _ = repo
+            .repo
             .reference(&decrypt_ref, decrypt_obj_oid, true, "Update decrypt cache");
     }
     Ok(decrypted_bytes)
