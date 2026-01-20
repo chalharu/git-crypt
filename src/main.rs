@@ -123,17 +123,17 @@ fn main() {
 #[derive(Debug, thiserror::Error)]
 enum Error {
     #[error("Failed to load git configuration")]
-    GitConfigError(#[from] git2::Error),
+    GitConfig(#[from] git2::Error),
     #[error("IO error occurred")]
-    IoError(#[from] std::io::Error),
+    Io(#[from] std::io::Error),
     #[error("PGP error occurred")]
-    PgpError(#[from] pgp::errors::Error),
+    Pgp(#[from] pgp::errors::Error),
     #[error("Encryption subkey is not valid for encryption")]
     InvalidEncryptionSubkey,
     #[error("Hex decoding error")]
-    HexDecodingError(#[from] hex::FromHexError),
+    HexDecoding(#[from] hex::FromHexError),
     #[error("Regex error occurred")]
-    RegexError(#[from] regex::Error),
+    Regex(#[from] regex::Error),
 }
 
 #[derive(Debug)]
@@ -212,7 +212,7 @@ impl GitConfig {
                 return Ok(None);
             }
         }
-        Ok(self.encryption_key_id_vec.as_ref().map(|v| v.as_slice()))
+        Ok(self.encryption_key_id_vec.as_deref())
     }
 }
 
@@ -321,21 +321,20 @@ fn encrypt(
         } else {
             Some(decrypted_data)
         } && let Ok(decompressed_bytes) = decompressed_data.as_data_vec()
+            && decompressed_bytes.iter().eq(data.iter())
         {
-            if decompressed_bytes.iter().eq(data.iter()) {
-                // キャッシュ化
-                let raw_ref = format!("refs/crypt-cache/decrypt/{}", index_entry.id);
+            // キャッシュ化
+            let raw_ref = format!("refs/crypt-cache/decrypt/{}", index_entry.id);
 
-                // 失敗しても無視
-                let _ =
-                    repo.repo
-                        .reference(&encrypt_ref, index_entry.id, true, "Update encrypt cache");
-                let _ = repo
-                    .repo
-                    .reference(&raw_ref, oid, true, "Update decrypt cache")?;
+            // 失敗しても無視
+            let _ = repo
+                .repo
+                .reference(&encrypt_ref, index_entry.id, true, "Update encrypt cache");
+            let _ = repo
+                .repo
+                .reference(&raw_ref, oid, true, "Update decrypt cache")?;
 
-                return Ok(blob.content().to_vec());
-            }
+            return Ok(blob.content().to_vec());
         }
     }
 
