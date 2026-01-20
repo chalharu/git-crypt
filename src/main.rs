@@ -7,7 +7,10 @@ use std::{
 };
 
 use clap::{Parser, Subcommand};
-use git2::{Delta, DiffOptions, ObjectType, TreeWalkMode, TreeWalkResult};
+use git2::{
+    Delta, DiffOptions, MergeFileInput, MergeFileOptions, MergeOptions, ObjectType, TreeWalkMode,
+    TreeWalkResult,
+};
 use pgp::{
     composed::{
         ArmorOptions, DecryptionOptions, Deserializable as _, Esk, Message, MessageBuilder,
@@ -107,11 +110,16 @@ fn main() {
             marker_size,
             file_path,
         } => {
-            // TODO: Implement debug trace output
-            println!(
-                "Merging files: {} {} {} {} {}",
-                base, local, remote, marker_size, file_path
-            );
+            if let Err(e) = merge(
+                Path::new(&base),
+                Path::new(&local),
+                Path::new(&remote),
+                marker_size.parse().ok(),
+                Path::new(&file_path),
+            ) {
+                eprintln!("Error during merge: {}", e);
+                std::process::exit(1);
+            }
         }
         Commands::PreCommit => {
             if let Err(e) = pre_commit() {
@@ -601,11 +609,11 @@ fn pre_auto_gc() -> Result<(), Error> {
         let commit = repo.repo.find_commit(commit_oid)?;
         let tree = commit.tree()?;
         tree.walk(TreeWalkMode::PreOrder, |_, entry| {
-            if entry.kind() == Some(ObjectType::Blob) {
-                if let Some(keys) = weak_map.remove(entry.id().to_string().as_str()) {
-                    for key in keys {
-                        crypt_cache_paths.remove(&key);
-                    }
+            if entry.kind() == Some(ObjectType::Blob)
+                && let Some(keys) = weak_map.remove(entry.id().to_string().as_str())
+            {
+                for key in keys {
+                    crypt_cache_paths.remove(&key);
                 }
             }
             TreeWalkResult::Ok
@@ -616,9 +624,54 @@ fn pre_auto_gc() -> Result<(), Error> {
     for (_, ref_name) in crypt_cache_paths {
         if let Ok(mut reference) = repo.repo.find_reference(&ref_name) {
             eprintln!("Deleting unused reference: {}", ref_name);
-            let _ = reference.delete()?;
+            // エラーが発生しても無視
+            let _ = reference.delete();
         }
     }
+
+    Ok(())
+}
+
+fn merge(
+    base: &Path,
+    local: &Path,
+    remote: &Path,
+    marker_size: Option<usize>,
+    file_path: &Path,
+) -> Result<(), Error> {
+    let mut repo = GitRepository::new()?;
+    let mut config = load_git_config(&repo)?;
+    let keypair = KeyPair::try_from(&config)?;
+
+    let base_data = fs::read(base)?;
+    let base_data = decrypt(&keypair, &base_data, &mut repo, base, &mut config)?;
+    let mut base_obj = MergeFileInput::new();
+    base_obj.content(&base_data);
+    base_obj.path(base.to_string_lossy().as_ref());
+
+    let local_data = fs::read(local)?;
+    let local_data = decrypt(&keypair, &local_data, &mut repo, local, &mut config)?;
+    let mut local_obj = MergeFileInput::new();
+    local_obj.content(&local_data);
+    local_obj.path(local.to_string_lossy().as_ref());
+
+    let remote_data = fs::read(remote)?;
+    let remote_data = decrypt(&keypair, &remote_data, &mut repo, remote, &mut config)?;
+    let mut remote_obj = MergeFileInput::new();
+    remote_obj.content(&remote_data);
+    remote_obj.path(remote.to_string_lossy().as_ref());
+
+    // ここで3-wayマージを実行する
+    let mut opts = MergeOptions::new();
+    opts.fail_on_conflict(true);
+    let mut file_opts = MergeFileOptions::new();
+    if let Some(marker_size) = marker_size {
+        file_opts.marker_size(marker_size as u16);
+    }
+
+    let result = git2::merge_file(&base_obj, &local_obj, &remote_obj, Some(&mut file_opts))?;
+    let encrypted = encrypt(&keypair, &mut config, result.content(), local, &mut repo)?;
+    fs::write(file_path, &encrypted)?;
 
     Ok(())
 }
