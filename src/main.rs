@@ -85,8 +85,10 @@ fn main() {
             }
         }
         Commands::Smudge => {
-            // TODO: Implement debug trace output
-            println!("Smudging...");
+            if let Err(e) = smudge() {
+                eprintln!("Error during smudge: {}", e);
+                std::process::exit(1);
+            }
         }
         Commands::Textconv { file_path } => {
             // TODO: Implement debug trace output
@@ -268,6 +270,21 @@ fn clean(path: &Path) -> Result<(), Error> {
     Ok(())
 }
 
+fn smudge() -> Result<(), Error> {
+    let mut repo = GitRepository::new()?;
+
+    let config = load_git_config(&repo)?;
+    let keypair = KeyPair::try_from(&config)?;
+
+    let mut data = Vec::new();
+    std::io::stdin().lock().read_to_end(&mut data)?;
+
+    let decrypted = decrypt(&keypair, &data, &mut repo)?;
+    std::io::stdout().write_all(&decrypted)?;
+
+    Ok(())
+}
+
 fn encrypt(
     key_pair: &KeyPair,
     config: &mut GitConfig,
@@ -297,7 +314,7 @@ fn encrypt(
     if let Ok(message) = Message::from_bytes(data)
         && message.is_encrypted()
     {
-        // すでに署名されている場合はそのまま出力
+        // すでに暗号化されている場合はそのまま出力
         return Ok(data.to_vec());
     }
 
@@ -376,4 +393,53 @@ fn encrypt(
     }
 
     Ok(encrypted.as_bytes().to_vec())
+}
+
+fn decrypt(key_pair: &KeyPair, data: &[u8], repo: &mut GitRepository) -> Result<Vec<u8>, Error> {
+    let Ok((message, _)) = Message::from_armor(data) else {
+        // Messageオブジェクトに変換できない場合 = 暗号化されていない場合はそのまま出力
+        eprintln!("Not a PGP message, outputting raw data");
+        return Ok(data.to_vec());
+    };
+    if !message.is_encrypted() {
+        // 暗号化されていない場合はそのまま出力
+        return Ok(data.to_vec());
+    }
+
+    // キャッシュ確認
+    let oid = repo.repo.blob(data)?;
+    let decrypt_ref = format!("refs/crypt-cache/decrypt/{}", oid);
+    if let Ok(decrypt_obj) = repo.repo.find_reference(&decrypt_ref)
+        && let Some(ref_target) = decrypt_obj.target()
+        && let Ok(decrypt_blob) = repo.repo.find_blob(ref_target)
+    {
+        // キャッシュヒット
+        return Ok(decrypt_blob.content().to_vec());
+    }
+
+    // 復号化処理
+    let decrypted_message = match message.decrypt(&"".into(), &key_pair.private_key) {
+        Ok(msg) => msg,
+        Err(pgp::errors::Error::MissingKey) => {
+            // 復号化キーが見つからない場合はそのまま出力
+            return Ok(data.to_vec());
+        }
+        Err(e) => return Err(e.into()),
+    };
+    let mut decompressed_data = if decrypted_message.is_compressed() {
+        decrypted_message.decompress()?
+    } else {
+        decrypted_message
+    };
+    let decrypted_bytes = decompressed_data.as_data_vec()?;
+
+    // キャッシュ化
+    if let Ok(decrypt_obj_oid) = repo.repo.blob(decrypted_bytes.as_slice()) {
+        let encrypt_ref = format!("refs/crypt-cache/encrypt/{}", oid);
+        repo.repo
+            .reference(&decrypt_ref, decrypt_obj_oid, true, "Update decrypt cache")?;
+        repo.repo
+            .reference(&encrypt_ref, oid, true, "Update encrypt cache")?;
+    }
+    Ok(decrypted_bytes)
 }
