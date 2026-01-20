@@ -284,13 +284,13 @@ fn clean(path: &Path) -> Result<(), Error> {
 fn smudge() -> Result<(), Error> {
     let mut repo = GitRepository::new()?;
 
-    let config = load_git_config(&repo)?;
+    let mut config = load_git_config(&repo)?;
     let keypair = KeyPair::try_from(&config)?;
 
     let mut data = Vec::new();
     std::io::stdin().lock().read_to_end(&mut data)?;
 
-    let decrypted = decrypt(&keypair, &data, &mut repo)?;
+    let decrypted = decrypt(&keypair, &data, &mut repo, &mut config)?;
     std::io::stdout().write_all(&decrypted)?;
 
     Ok(())
@@ -322,8 +322,7 @@ fn encrypt(
         };
     };
 
-    if let Ok(message) = Message::from_bytes(data)
-    {
+    if let Ok(message) = Message::from_bytes(data) {
         if config.is_encrypted_by_key(&message)? {
             // すでに指定されたキーIDに一致する公開鍵で暗号化されている場合、そのまま出力
             return Ok(data.to_vec());
@@ -408,13 +407,22 @@ fn encrypt(
     Ok(encrypted.as_bytes().to_vec())
 }
 
-fn decrypt(key_pair: &KeyPair, data: &[u8], repo: &mut GitRepository) -> Result<Vec<u8>, Error> {
+fn decrypt(
+    key_pair: &KeyPair,
+    data: &[u8],
+    repo: &mut GitRepository,
+    config: &mut GitConfig,
+) -> Result<Vec<u8>, Error> {
     let Ok((message, _)) = Message::from_armor(data) else {
         // Messageオブジェクトに変換できない場合 = 暗号化されていない場合、パケットが壊れている場合はそのまま出力
         return Ok(data.to_vec());
     };
     if !message.is_encrypted() {
         // 暗号化されていない場合はそのまま出力
+        return Ok(data.to_vec());
+    }
+    if !config.is_encrypted_by_key(&message)? {
+        // 指定されたキーIDに一致する公開鍵で暗号化されていない場合はそのまま出力
         return Ok(data.to_vec());
     }
 
