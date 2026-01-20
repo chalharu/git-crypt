@@ -516,7 +516,8 @@ fn pre_commit() -> Result<(), Error> {
             .head()
             .ok()
             .and_then(|head_ref| head_ref.target())
-            .and_then(|head| repo.repo.find_tree(head).ok())
+            .and_then(|head| repo.repo.find_commit(head).ok())
+            .and_then(|head| head.tree().ok())
             .as_ref(),
         None,
         Some(
@@ -525,6 +526,7 @@ fn pre_commit() -> Result<(), Error> {
                 .ignore_case(true),
         ),
     )?;
+
     for d in diff.deltas().filter(|d| {
         matches!(
             d.status(),
@@ -538,13 +540,12 @@ fn pre_commit() -> Result<(), Error> {
             let blob = repo.repo.find_blob(oid)?;
             let data = blob.content();
 
-            let (message, _) = Message::from_armor(data)?;
-
-            if config.is_encrypted_by_key(&message)? {
+            if let Ok((message, _)) = Message::from_armor(data)
+                && config.is_encrypted_by_key(&message)?
+            {
                 continue; // 暗号化されているので次へ
-            } else {
-                return Err(Error::NotEncrypted(file_path.to_path_buf()));
             }
+            return Err(Error::NotEncrypted(file_path.to_path_buf()));
         }
     }
     Ok(())
