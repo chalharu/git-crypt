@@ -2,10 +2,11 @@ use std::{
     env::current_dir,
     fs,
     io::{Read, Write as _},
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 use clap::{Parser, Subcommand};
+use git2::{Delta, DiffOptions};
 use pgp::{
     composed::{
         ArmorOptions, DecryptionOptions, Deserializable as _, Esk, Message, MessageBuilder,
@@ -112,8 +113,10 @@ fn main() {
             );
         }
         Commands::PreCommit => {
-            // TODO: Implement debug trace output
-            println!("Running pre-commit hooks...");
+            if let Err(e) = pre_commit() {
+                eprintln!("Pre-commit hook failed: {}", e);
+                std::process::exit(1);
+            }
         }
         Commands::PreAutoGc => {
             // TODO: Implement debug trace output
@@ -140,6 +143,8 @@ enum Error {
     HexDecoding(#[from] hex::FromHexError),
     #[error("Regex error occurred")]
     Regex(#[from] regex::Error),
+    #[error("File '{0}' is not encrypted. Clean filter may not be working.")]
+    NotEncrypted(PathBuf),
 }
 
 #[derive(Debug)]
@@ -499,5 +504,48 @@ fn textconv(path: &Path) -> Result<(), Error> {
     let decrypted = decrypt(&keypair, &data, &mut repo, path, &mut config)?;
     std::io::stdout().write_all(&decrypted)?;
 
+    Ok(())
+}
+
+fn pre_commit() -> Result<(), Error> {
+    let repo = GitRepository::new()?;
+    let mut config = load_git_config(&repo)?;
+
+    let diff = repo.repo.diff_tree_to_index(
+        repo.repo
+            .head()
+            .ok()
+            .and_then(|head_ref| head_ref.target())
+            .and_then(|head| repo.repo.find_tree(head).ok())
+            .as_ref(),
+        None,
+        Some(
+            DiffOptions::default()
+                .ignore_filemode(true)
+                .ignore_case(true),
+        ),
+    )?;
+    for d in diff.deltas().filter(|d| {
+        matches!(
+            d.status(),
+            Delta::Added | Delta::Modified | Delta::Renamed | Delta::Copied
+        )
+    }) {
+        let oid = d.new_file().id();
+        if let Some(file_path) = d.new_file().path()
+            && config.is_encryption(file_path)?
+        {
+            let blob = repo.repo.find_blob(oid)?;
+            let data = blob.content();
+
+            let (message, _) = Message::from_armor(data)?;
+
+            if config.is_encrypted_by_key(&message)? {
+                continue; // 暗号化されているので次へ
+            } else {
+                return Err(Error::NotEncrypted(file_path.to_path_buf()));
+            }
+        }
+    }
     Ok(())
 }
