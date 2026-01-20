@@ -8,8 +8,8 @@ use std::{
 use clap::{Parser, Subcommand};
 use pgp::{
     composed::{
-        ArmorOptions, Deserializable as _, Message, MessageBuilder, SignedPublicKey,
-        SignedSecretKey,
+        ArmorOptions, DecryptionOptions, Deserializable as _, Message, MessageBuilder,
+        SignedPublicKey, SignedSecretKey, TheRing,
     },
     crypto::sym::SymmetricKeyAlgorithm,
     types::{CompressionAlgorithm, KeyDetails, PublicKeyTrait},
@@ -84,7 +84,7 @@ fn main() {
         }
         Commands::Smudge => {
             if let Err(e) = smudge() {
-                eprintln!("Error during smudge: {}", e);
+                eprintln!("Error during smudge: {:?}", e);
                 std::process::exit(1);
             }
         }
@@ -409,7 +409,15 @@ fn decrypt(key_pair: &KeyPair, data: &[u8], repo: &mut GitRepository) -> Result<
     }
 
     // 復号化処理
-    let decrypted_message = match message.decrypt(&"".into(), &key_pair.private_key) {
+    let decrypt_options = DecryptionOptions::new().enable_gnupg_aead().enable_legacy();
+    let password = "".into();
+    let ring = TheRing {
+        secret_keys: vec![&key_pair.private_key],
+        key_passwords: vec![&password],
+        decrypt_options,
+        ..Default::default()
+    };
+    let (decrypted_message, _) = match message.decrypt_the_ring(ring, true) {
         Ok(msg) => msg,
         Err(pgp::errors::Error::MissingKey) => {
             // 復号化キーが見つからない場合はそのまま出力
