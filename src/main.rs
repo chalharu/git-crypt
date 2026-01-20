@@ -1,4 +1,5 @@
 use std::{
+    collections::{HashMap, HashSet},
     env::current_dir,
     fs,
     io::{Read, Write as _},
@@ -6,7 +7,7 @@ use std::{
 };
 
 use clap::{Parser, Subcommand};
-use git2::{Delta, DiffOptions};
+use git2::{Delta, DiffOptions, ObjectType, TreeWalkMode, TreeWalkResult};
 use pgp::{
     composed::{
         ArmorOptions, DecryptionOptions, Deserializable as _, Esk, Message, MessageBuilder,
@@ -119,8 +120,10 @@ fn main() {
             }
         }
         Commands::PreAutoGc => {
-            // TODO: Implement debug trace output
-            println!("Running pre-auto-gc hooks...");
+            if let Err(e) = pre_auto_gc() {
+                eprintln!("Pre-auto-gc hook failed: {}", e);
+                std::process::exit(1);
+            }
         }
         Commands::Process => {
             // TODO: Implement debug trace output
@@ -553,9 +556,69 @@ fn pre_commit() -> Result<(), Error> {
 
 fn pre_auto_gc() -> Result<(), Error> {
     let repo = GitRepository::new()?;
-    let mut config = load_git_config(&repo)?;
 
-    // TODO: Implement pre-auto-gc logic
+    let mut crypt_cache_paths = HashMap::new();
+    let mut weak_map = HashMap::new();
+
+    // 既存のcrypt-cache参照を取得
+    for reference in repo.repo.references_glob("refs/crypt-cache/*")? {
+        let reference = reference?;
+        if let Some(name) = reference.name() {
+            let parts: Vec<&str> = name.split('/').collect();
+            // refs/crypt-cache/{type}/{oid}
+            if parts.len() == 4 {
+                let oid_str = parts[3];
+                let target_oid = reference.target().unwrap();
+                let key = crypt_cache_paths.len();
+                crypt_cache_paths.insert(key, name.to_string());
+                weak_map
+                    .entry(oid_str.to_string())
+                    .or_insert(HashSet::new())
+                    .insert(key);
+                weak_map
+                    .entry(target_oid.to_string())
+                    .or_insert(HashSet::new())
+                    .insert(key);
+            }
+        }
+    }
+
+    let mut revwalk = repo.repo.revwalk()?;
+
+    // 参照をすべて追加
+    for reference in repo.repo.references()? {
+        let reference = reference?;
+        if let Some(name) = reference.name()
+            && !name.starts_with("refs/crypt-cache")
+        {
+            revwalk.push_ref(name)?;
+        }
+    }
+
+    // 利用しているオブジェクトを確認し、削除してはならないcrypt-cache参照を削除
+    for commit_oid in revwalk {
+        let commit_oid = commit_oid?;
+        let commit = repo.repo.find_commit(commit_oid)?;
+        let tree = commit.tree()?;
+        tree.walk(TreeWalkMode::PreOrder, |_, entry| {
+            if entry.kind() == Some(ObjectType::Blob) {
+                if let Some(keys) = weak_map.remove(entry.id().to_string().as_str()) {
+                    for key in keys {
+                        crypt_cache_paths.remove(&key);
+                    }
+                }
+            }
+            TreeWalkResult::Ok
+        })?;
+    }
+
+    // 残ったcrypt-cache参照を削除
+    for (_, ref_name) in crypt_cache_paths {
+        if let Ok(mut reference) = repo.repo.find_reference(&ref_name) {
+            eprintln!("Deleting unused reference: {}", ref_name);
+            let _ = reference.delete()?;
+        }
+    }
 
     Ok(())
 }
