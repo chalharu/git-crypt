@@ -65,8 +65,6 @@ pub enum Commands {
     PreAutoGc,
     /// git clean/smudgeのprocessコマンド
     Process,
-    /// 開発用テストコマンド
-    Test,
 }
 
 fn main() {
@@ -118,13 +116,6 @@ fn main() {
         Commands::Process => {
             // TODO: Implement debug trace output
             println!("Processing...");
-        }
-        Commands::Test => {
-            let config =
-                load_git_config(&GitRepository::new().unwrap()).expect("Failed to load git config");
-            let keypair = KeyPair::try_from(&config).expect("Failed to create keypair");
-
-            println!("{:?}", keypair);
         }
     }
 }
