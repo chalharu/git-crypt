@@ -12,8 +12,9 @@ use pgp::{
         SignedSecretKey,
     },
     crypto::sym::SymmetricKeyAlgorithm,
-    types::{CompressionAlgorithm, PublicKeyTrait},
+    types::{CompressionAlgorithm, KeyDetails, PublicKeyTrait},
 };
+use regex::Regex;
 
 #[derive(Parser, Clone, Debug)]
 struct Cli {
@@ -119,7 +120,7 @@ fn main() {
         Commands::Test => {
             let config =
                 load_git_config(&GitRepository::new().unwrap()).expect("Failed to load git config");
-            let keypair = KeyPair::try_from(config).expect("Failed to create keypair");
+            let keypair = KeyPair::try_from(&config).expect("Failed to create keypair");
 
             println!("{:?}", keypair);
         }
@@ -136,6 +137,10 @@ enum Error {
     PgpError(#[from] pgp::errors::Error),
     #[error("Encryption subkey is not valid for encryption")]
     InvalidEncryptionSubkey,
+    #[error("Hex decoding error")]
+    HexDecodingError(#[from] hex::FromHexError),
+    #[error("Regex error occurred")]
+    RegexError(#[from] regex::Error),
 }
 
 #[derive(Debug)]
@@ -144,11 +149,11 @@ struct KeyPair {
     private_key: SignedSecretKey,
 }
 
-impl TryFrom<GitConfig> for KeyPair {
+impl TryFrom<&GitConfig> for KeyPair {
     type Error = Error;
-    fn try_from(config: GitConfig) -> Result<Self, Error> {
-        let public_key = read_public_key(&fs::read(config.public_key)?)?;
-        let private_key = read_secret_key(&fs::read(config.private_key)?)?;
+    fn try_from(config: &GitConfig) -> Result<Self, Error> {
+        let public_key = read_public_key(&fs::read(&config.public_key)?)?;
+        let private_key = read_secret_key(&fs::read(&config.private_key)?)?;
         Ok(KeyPair {
             public_key,
             private_key,
@@ -180,6 +185,42 @@ fn read_public_key(input: &[u8]) -> Result<SignedPublicKey, Error> {
 struct GitConfig {
     public_key: String,
     private_key: String,
+    encryption_path_regex: Option<String>,
+    encryption_key_id: Option<String>,
+
+    // flyweight pattern
+    encryption_path_regex_instance: Option<Regex>,
+    encryption_key_id_vec: Option<Vec<u8>>,
+}
+
+impl GitConfig {
+    fn is_encryption(&mut self, path: &Path) -> Result<bool, Error> {
+        if self.encryption_path_regex_instance.is_none() {
+            if let Some(ref regex_str) = self.encryption_path_regex {
+                let compiled_regex = Regex::new(regex_str)?;
+                self.encryption_path_regex_instance = Some(compiled_regex);
+            } else {
+                // 正規表現が設定されていない場合は常にtrueを返す = すべてのファイルを暗号化対象とする
+                return Ok(true);
+            }
+        }
+        // ここまで来たら正規表現が存在するのでunwrapして使用
+        let regex = self.encryption_path_regex_instance.as_ref().unwrap();
+        Ok(regex.is_match(path.to_str().unwrap_or_default()))
+    }
+
+    fn encryption_key_id(&mut self) -> Result<Option<&[u8]>, Error> {
+        if self.encryption_key_id_vec.is_none() {
+            if let Some(ref encryption_key_id) = self.encryption_key_id {
+                let encryption_key_id_vec = hex::decode(encryption_key_id)?;
+                self.encryption_key_id_vec = Some(encryption_key_id_vec);
+            } else {
+                // encryption_key_idが設定されていない場合はNoneを返す
+                return Ok(None);
+            }
+        }
+        Ok(self.encryption_key_id_vec.as_ref().map(|v| v.as_slice()))
+    }
 }
 
 // gitの設定を読み込む関数
@@ -188,10 +229,16 @@ fn load_git_config(repo: &GitRepository) -> Result<GitConfig, Error> {
 
     let public_key = config.get_string("git-crypt.public-key")?;
     let private_key = config.get_string("git-crypt.private-key")?;
+    let encryption_path_regex = config.get_string("git-crypt.encryption-path-regex").ok();
+    let encryption_key_id = config.get_string("git-crypt.encryption-key-id").ok();
 
     Ok(GitConfig {
         public_key,
         private_key,
+        encryption_path_regex,
+        encryption_key_id,
+        encryption_path_regex_instance: None,
+        encryption_key_id_vec: None,
     })
 }
 
@@ -209,15 +256,13 @@ impl GitRepository {
 fn clean(path: &Path) -> Result<(), Error> {
     let mut repo = GitRepository::new()?;
 
-    let keypair = {
-        let config = load_git_config(&repo)?;
-        KeyPair::try_from(config)?
-    };
+    let mut config = load_git_config(&repo)?;
+    let keypair = KeyPair::try_from(&config)?;
 
     let mut data = Vec::new();
     std::io::stdin().lock().read_to_end(&mut data)?;
 
-    let encrypted = encrypt(&keypair, &data, path, &mut repo)?;
+    let encrypted = encrypt(&keypair, &mut config, &data, path, &mut repo)?;
     std::io::stdout().write_all(&encrypted)?;
 
     Ok(())
@@ -225,10 +270,15 @@ fn clean(path: &Path) -> Result<(), Error> {
 
 fn encrypt(
     key_pair: &KeyPair,
+    config: &mut GitConfig,
     data: &[u8],
     path: &Path,
     repo: &mut GitRepository,
 ) -> Result<Vec<u8>, Error> {
+    if !config.is_encryption(path)? {
+        // 暗号化対象外のファイルの場合はそのまま出力
+        return Ok(data.to_vec());
+    }
     // git hash-objectとして登録
     let oid = repo.repo.blob(data)?;
 
@@ -282,10 +332,28 @@ fn encrypt(
     }
 
     // ファイルを暗号化して出力
-    let encryption_subkey = &key_pair.public_key.public_subkeys[0];
-    if !encryption_subkey.is_encryption_key() {
-        return Err(Error::InvalidEncryptionSubkey);
-    }
+    let encryption_subkey = if let Some(key_id) = config.encryption_key_id()? {
+        // 指定されたキーIDに一致するサブキーを探す
+        key_pair.public_key.public_subkeys.iter().find(|subkey| {
+            subkey.is_encryption_key()
+                && subkey
+                    .as_unsigned()
+                    .key_id()
+                    .as_ref()
+                    .iter()
+                    .eq(key_id.iter())
+        })
+    } else {
+        key_pair
+            .public_key
+            .public_subkeys
+            .iter()
+            .find(|subkey| subkey.is_encryption_key())
+    };
+    let encryption_subkey = match encryption_subkey {
+        Some(key) => key,
+        None => return Err(Error::InvalidEncryptionSubkey),
+    };
 
     let mut builder = MessageBuilder::from_bytes("", data.to_vec())
         .seipd_v1(rand::thread_rng(), SymmetricKeyAlgorithm::AES256);
