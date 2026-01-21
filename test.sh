@@ -156,6 +156,9 @@ fi
 
 if ! grep -E '^-----BEGIN PGP MESSAGE-----' "$TMPDIR/local.enc" > /dev/null; then
   echo "FAIL: clean output is not a PGP message" >&2
+  echo "--- Merged result (encrypted) ---"
+  cat "$TMPDIR/local.enc"
+  echo "--- End of merged result (encrypted) ---"
   exit 1
 fi
 
