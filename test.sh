@@ -361,6 +361,72 @@ fi
 echo "PASS: process command (clean)"
 echo ""
 
+# テスト8: process コマンド（smudge）
+echo "=== Test 8: process command (smudge) ==="
+PROCESS_OUTPUT="$TMPDIR/process_output_smudge"
+# pkt-line handshake + smudge命令をシミュレート
+{
+    write_pkt_test "git-filter-client"
+    write_pkt_test "version=2"
+    printf "0000"
+    
+    write_pkt_test "capability=smudge"
+    printf "0000"
+
+    write_pkt_test "command=smudge"
+    write_pkt_test "pathname=$TEST_PATH"
+    printf "0000"
+    
+    # データペイロード
+    PAYLOAD_LEN=$(($(wc -c < "$TMPDIR/encrypted") + 4))
+    printf '%04x' "$PAYLOAD_LEN"
+    cat "$TMPDIR/encrypted"
+    printf "0000"
+} | "$GIT_CRYPT" process > "$PROCESS_OUTPUT"
+
+if [ $? -ne 0 ]; then
+    echo "FAIL: process command (smudge) returned non-zero" >&2
+    exit 1
+fi
+
+# 受信データを分解
+HEADER="0015git-filter-server000dversion=200000015capability=smudge00000012status=success"
+HEADER_LEN="${#HEADER}"
+PROCESS_OUTPUT_HEADER=$(get_head "$HEADER_LEN" "$PROCESS_OUTPUT")
+
+if [ "$PROCESS_OUTPUT_HEADER" != "$HEADER" ]; then
+  echo "FAIL: process command (smudge) header mismatch" >&2
+  exit 1
+fi
+
+TRAILER="00000000"
+PROCESS_OUTPUT_TRAILER=$(tail -c 8 "$PROCESS_OUTPUT")
+if [ "$PROCESS_OUTPUT_TRAILER" != "$TRAILER" ]; then
+  echo "FAIL: process command (smudge) trailer mismatch" >&2
+  exit 1
+fi
+
+PROCESS_OUTPUT_PAYLOAD=$(tail -c +$(($HEADER_LEN + 5)) "$PROCESS_OUTPUT")
+PROCESS_OUTPUT_PAYLOAD_LENGTH_HEX=$(echo "$PROCESS_OUTPUT_PAYLOAD" | get_head 4)
+PROCESS_OUTPUT_PAYLOAD_LENGTH=$(from_hex $PROCESS_OUTPUT_PAYLOAD_LENGTH_HEX)
+PROCESS_OUTPUT_PAYLOAD_TOTAL_LENGTH=$(echo "$PROCESS_OUTPUT_PAYLOAD" | wc -c)
+PROCESS_OUTPUT_PAYLOAD_TOTAL_LENGTH=$(( $PROCESS_OUTPUT_PAYLOAD_TOTAL_LENGTH - 9 ))
+
+if [ $PROCESS_OUTPUT_PAYLOAD_TOTAL_LENGTH -ne $PROCESS_OUTPUT_PAYLOAD_LENGTH ]; then
+  echo "FAIL: process command (smudge) payload length mismatch" >&2
+  exit 1
+fi
+
+PROCESS_OUTPUT_PAYLOAD_BODY=$(echo "$PROCESS_OUTPUT_PAYLOAD" | tail -c +5 | get_head "$((PROCESS_OUTPUT_PAYLOAD_TOTAL_LENGTH - 4))")
+
+if ! (printf '%s' "$PROCESS_OUTPUT_PAYLOAD_BODY" | diff -u "$TMPDIR/decrypted" -); then
+  echo "FAIL: process command (smudge) payload mismatch" >&2
+  exit 1
+fi
+
+echo "PASS: process command (smudge)"
+echo ""
+
 # テスト9: pre-auto-gcフック
 echo "=== Test 9: pre-auto-gc hook ==="
 # pre-auto-gcフックを実行してエラーが出ないことを確認
