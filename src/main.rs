@@ -1,7 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
     env::current_dir,
-    ffi::{CStr, OsStr, OsString},
     fs,
     io::{self, BufReader, BufWriter, ErrorKind, Read as _, StdinLock, StdoutLock, Write as _},
     path::{Path, PathBuf},
@@ -9,8 +8,7 @@ use std::{
 
 use clap::{Parser, Subcommand};
 use git2::{
-    Delta, DiffOptions, MergeFileInput, MergeFileOptions, MergeOptions, ObjectType, TreeWalkMode,
-    TreeWalkResult,
+    Delta, DiffOptions, MergeFileInput, MergeFileOptions, ObjectType, TreeWalkMode, TreeWalkResult,
 };
 use pgp::{
     composed::{
@@ -138,18 +136,7 @@ fn main() {
             }
         }
         Commands::Process => {
-            let pkt_io = PktLineIO::new();
-
-            let repo = GitRepository::new().unwrap();
-            let config = load_git_config(&repo).unwrap();
-            let keypair = KeyPair::try_from(&config).unwrap();
-
-            let mut processor = PktLineProcess {
-                pkt_io,
-                repo,
-                config,
-                keypair,
-            };
+            let mut processor = PktLineProcess::new().unwrap();
 
             if let Err(e) = processor.process() {
                 eprintln!("Error during process: {}", e);
@@ -837,7 +824,7 @@ impl PktLineProcess {
         while let Some(payload) = self.pkt_io.read_pkt_line()? {
             match payload.as_slice() {
                 b"version=2" => valid_version = true,
-                p => {
+                _ => {
                     // eprintln!("Unknown handshake packet: {}", String::from_utf8_lossy(p));
                 }
             }
