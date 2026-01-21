@@ -110,15 +110,18 @@ fn main() {
             marker_size,
             file_path,
         } => {
-            if let Err(e) = merge(
+            match merge(
                 Path::new(&base),
                 Path::new(&local),
                 Path::new(&remote),
                 marker_size.parse().ok(),
                 Path::new(&file_path),
             ) {
-                eprintln!("Error during merge: {}", e);
-                std::process::exit(1);
+                Ok(is_automergeable) => std::process::exit(if is_automergeable { 0 } else { 1 }),
+                Err(e) => {
+                    eprintln!("Error during merge: {}", e);
+                    std::process::exit(2);
+                }
             }
         }
         Commands::PreCommit => {
@@ -638,7 +641,7 @@ fn merge(
     remote: &Path,
     marker_size: Option<usize>,
     file_path: &Path,
-) -> Result<(), Error> {
+) -> Result<bool, Error> {
     let mut repo = GitRepository::new()?;
     let mut config = load_git_config(&repo)?;
     let keypair = KeyPair::try_from(&config)?;
@@ -684,5 +687,5 @@ fn merge(
     local_file.write_all(&encrypted)?;
     local_file.flush()?;
 
-    Ok(())
+    Ok(result.is_automergeable())
 }
