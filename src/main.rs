@@ -830,7 +830,6 @@ impl PktLineProcess {
             }
         }
         if valid_version {
-            self.pkt_io.write_pkt_line(b"git-filter-server")?;
             self.pkt_io.write_pkt_line(b"version=2")?;
             self.pkt_io.write_flush_pkt()?;
             Ok(())

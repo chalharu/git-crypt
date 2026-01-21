@@ -1,5 +1,30 @@
 #!/bin/sh
 
+# テストヘルパー関数
+
+get_head() {
+  if [ "$1" -le 0 ]; then
+    return 0
+  fi
+  if [ -z "${2-}" ] || [ "${2-}" = "-" ]; then
+    dd bs="$1" count=1 iflag=fullblock 2>/dev/null
+  else
+    dd bs="$1" count=1 if="$2" iflag=fullblock 2>/dev/null
+  fi
+}
+
+# pkt-lineを生成して標準出力に書き込む
+write_pkt_test() {
+    PAYLOAD="$1"
+    PAYLOAD_LEN=$((${#PAYLOAD} + 4))
+    printf '%04x%s' "$PAYLOAD_LEN" "$PAYLOAD"
+}
+
+from_hex() {
+    VAL="0x$1"
+    echo "$(( VAL ))"
+}
+
 set -u
 
 # プロジェクトのビルド
@@ -258,6 +283,82 @@ if ! "$GIT_CRYPT" pre-commit; then
   exit 1
 fi
 echo "PASS: pre-commit hook"
+echo ""
+
+# テスト7: process コマンド（clean）
+echo "=== Test 7: process command (clean) ==="
+
+PROCESS_OUTPUT="$TMPDIR/process_output"
+
+# pkt-line handshake + clean命令をシミュレート
+{
+    write_pkt_test "git-filter-client"
+    write_pkt_test "version=2"
+    printf "0000"
+    
+    write_pkt_test "capability=clean"
+    printf "0000"
+
+    write_pkt_test "command=clean"
+    write_pkt_test "pathname=$TEST_PATH"
+    printf "0000"
+    
+    # データペイロード
+    PAYLOAD_LEN=$((${#PLAINTEXT} + 4))
+    printf '%04x%s' "$PAYLOAD_LEN" "$PLAINTEXT"
+    printf "0000"
+} | "$GIT_CRYPT" process > "$PROCESS_OUTPUT"
+
+if [ $? -ne 0 ]; then
+    echo "FAIL: process command returned non-zero" >&2
+    exit 1
+fi
+
+if ! grep -E '\-----BEGIN PGP MESSAGE-----' "$PROCESS_OUTPUT" > /dev/null; then
+  echo "FAIL: process command (clean) output is not a PGP message" >&2
+  exit 1
+fi
+
+# 受信データを分解
+HEADER="0015git-filter-server000dversion=200000014capability=clean00000012status=success"
+HEADER_LEN="${#HEADER}"
+PROCESS_OUTPUT_HEADER=$(get_head "$HEADER_LEN" "$PROCESS_OUTPUT")
+
+if [ "$PROCESS_OUTPUT_HEADER" != "$HEADER" ]; then
+  echo "FAIL: process command (clean) header mismatch" >&2
+  echo "Expected:"
+  echo "$HEADER"
+  echo "Actual:"
+  echo "$PROCESS_OUTPUT_HEADER"
+  exit 1
+fi
+
+TRAILER="00000000"
+PROCESS_OUTPUT_TRAILER=$(tail -c 8 "$PROCESS_OUTPUT")
+if [ "$PROCESS_OUTPUT_TRAILER" != "$TRAILER" ]; then
+  echo "FAIL: process command (clean) trailer mismatch" >&2
+  exit 1
+fi
+
+PROCESS_OUTPUT_PAYLOAD=$(tail -c +$(($HEADER_LEN + 5)) "$PROCESS_OUTPUT")
+PROCESS_OUTPUT_PAYLOAD_LENGTH_HEX=$(echo "$PROCESS_OUTPUT_PAYLOAD" | get_head 4)
+PROCESS_OUTPUT_PAYLOAD_LENGTH=$(from_hex $PROCESS_OUTPUT_PAYLOAD_LENGTH_HEX)
+PROCESS_OUTPUT_PAYLOAD_TOTAL_LENGTH=$(echo "$PROCESS_OUTPUT_PAYLOAD" | wc -c)
+PROCESS_OUTPUT_PAYLOAD_TOTAL_LENGTH=$(( $PROCESS_OUTPUT_PAYLOAD_TOTAL_LENGTH - 9 ))
+
+if [ $PROCESS_OUTPUT_PAYLOAD_TOTAL_LENGTH -ne $PROCESS_OUTPUT_PAYLOAD_LENGTH ]; then
+  echo "FAIL: process command (clean) payload length mismatch" >&2
+  exit 1
+fi
+
+PROCESS_OUTPUT_PAYLOAD_BODY=$(echo "$PROCESS_OUTPUT_PAYLOAD" | tail -c +5 | get_head "$((PROCESS_OUTPUT_PAYLOAD_TOTAL_LENGTH - 4))")
+
+if !(echo "$PROCESS_OUTPUT_PAYLOAD_BODY" | diff -u "$TMPDIR/encrypted" -); then
+  echo "FAIL: process command (clean) payload mismatch" >&2
+  exit 1
+fi
+
+echo "PASS: process command (clean)"
 echo ""
 
 # テスト9: pre-auto-gcフック
