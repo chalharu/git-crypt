@@ -18,7 +18,7 @@ use pgp::{
         SignedPublicKey, SignedSecretKey, TheRing,
     },
     crypto::sym::SymmetricKeyAlgorithm,
-    types::{CompressionAlgorithm, KeyDetails, PublicKeyTrait},
+    types::{CompressionAlgorithm, Imprint, KeyDetails, PublicKeyTrait},
 };
 use regex::Regex;
 
@@ -208,7 +208,9 @@ impl TryFrom<&GitConfig> for KeyPair {
     type Error = Error;
     fn try_from(config: &GitConfig) -> Result<Self, Error> {
         let public_key = read_public_key(&fs::read(&config.public_key)?)?;
+        log::debug!("Loaded public key: {}", public_key.fingerprint());
         let private_key = read_secret_key(&fs::read(&config.private_key)?)?;
+        log::debug!("Loaded private key: {}", private_key.fingerprint());
         Ok(KeyPair {
             public_key,
             private_key,
