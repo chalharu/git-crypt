@@ -154,7 +154,7 @@ if [ $RET -ne 0 ]; then
   exit 1
 fi
 
-if ! grep -E '^-----BEGIN PGP MESSAGE-----' "$TMPDIR/local.enc" > /dev/null; then
+if ! grep -E '\-----BEGIN PGP MESSAGE-----' "$TMPDIR/local.enc" > /dev/null; then
   echo "FAIL: clean output is not a PGP message" >&2
   echo "--- Merged result (encrypted) ---"
   cat "$TMPDIR/local.enc"
@@ -200,7 +200,7 @@ if [ $RET -ne 0 ]; then
   exit 1
 fi
 
-if grep -E '^-----BEGIN PGP MESSAGE-----' "$TMPDIR/local.enc" > /dev/null; then
+if grep -E '\-----BEGIN PGP MESSAGE-----' "$TMPDIR/local.enc" > /dev/null; then
   echo "FAIL: clean output is a PGP message" >&2
   exit 1
 fi
@@ -241,7 +241,7 @@ if [ $RET -eq 0 ]; then
   exit 1
 fi
 
-if ! grep -E '^-----BEGIN PGP MESSAGE-----' "$TMPDIR/local.enc" > /dev/null; then
+if ! grep -E '\-----BEGIN PGP MESSAGE-----' "$TMPDIR/local.enc" > /dev/null; then
   echo "FAIL: clean output is not a PGP message" >&2
   exit 1
 fi
