@@ -1,8 +1,9 @@
 use std::{
     collections::{HashMap, HashSet},
     env::current_dir,
+    ffi::{CStr, OsStr, OsString},
     fs,
-    io::{Read as _, Write as _},
+    io::{self, BufReader, BufWriter, ErrorKind, Read as _, StdinLock, StdoutLock, Write as _},
     path::{Path, PathBuf},
 };
 
@@ -159,6 +160,16 @@ enum Error {
     Regex(#[from] regex::Error),
     #[error("File '{0}' is not encrypted. Clean filter may not be working.")]
     NotEncrypted(PathBuf),
+    #[error("Invalid handshake payload: {0:?}")]
+    InvalidHandshakePayload(Vec<u8>),
+    #[error("Unexpected end of file")]
+    UnexpectedEof,
+    #[error("Invalid version")]
+    InvalidVersion,
+    #[error("Pathname is missing in the command")]
+    PathnameIsMissing,
+    #[error("Invalid pathname: {0:?}")]
+    InvalidPathname(Vec<u8>),
 }
 
 #[derive(Debug)]
@@ -667,8 +678,6 @@ fn merge(
     remote_obj.path(remote.to_string_lossy().as_ref());
 
     // ここで3-wayマージを実行する
-    let mut opts = MergeOptions::new();
-    opts.fail_on_conflict(true);
     let mut file_opts = MergeFileOptions::new();
     if let Some(marker_size) = marker_size {
         file_opts.marker_size(marker_size as u16);
@@ -688,4 +697,194 @@ fn merge(
     local_file.flush()?;
 
     Ok(result.is_automergeable())
+}
+
+struct PktLineIO {
+    reader: BufReader<StdinLock<'static>>,
+    writer: BufWriter<StdoutLock<'static>>,
+}
+
+impl PktLineIO {
+    fn new() -> Self {
+        let reader = std::io::stdin().lock();
+        let writer = std::io::stdout().lock();
+
+        let bufreader = BufReader::new(reader);
+        let bufwriter = BufWriter::new(writer);
+
+        PktLineIO {
+            reader: bufreader,
+            writer: bufwriter,
+        }
+    }
+
+    fn write_pkt_line(&mut self, data: &[u8]) -> Result<(), Error> {
+        let length = data.len() + 4; // 4 bytes for length prefix
+        let length_str = format!("{:04x}", length);
+        self.writer.write_all(length_str.as_bytes())?;
+        self.writer.write_all(data)?;
+        Ok(())
+    }
+
+    fn write_pkt_content(&mut self, data: &[u8]) -> Result<(), Error> {
+        const LARGE_PACKET_MAX: usize = 65520;
+        let mut offset = 0;
+        while offset < data.len() {
+            let chunk_size = std::cmp::min(LARGE_PACKET_MAX, data.len() - offset);
+            self.write_pkt_line(&data[offset..offset + chunk_size])?;
+            offset += chunk_size;
+        }
+        Ok(())
+    }
+
+    fn write_flush_pkt(&mut self) -> Result<(), Error> {
+        self.writer.write_all(b"0000")?;
+        self.writer.flush()?;
+        Ok(())
+    }
+
+    fn read_pkt_line(&mut self) -> Result<Option<Vec<u8>>, Error> {
+        let mut length_buf = [0u8; 4];
+        if let Err(e) = self.reader.read_exact(&mut length_buf) {
+            if e.kind() == ErrorKind::UnexpectedEof {
+                return Ok(None); // EOF reached
+            } else {
+                return Err(Error::Io(e));
+            }
+        }
+
+        let pkt_length = str::from_utf8(&length_buf)
+            .ok()
+            .and_then(|x| usize::from_str_radix(x, 16).ok())
+            .map_or_else(
+                || {
+                    Err(Error::Io(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "Invalid pkt-line length",
+                    )))
+                },
+                Ok,
+            )?;
+
+        if pkt_length == 0 {
+            return Ok(None); // Flush packet
+        }
+
+        let mut data_buf = vec![0u8; pkt_length - 4];
+        self.reader.read_exact(&mut data_buf)?;
+        Ok(Some(data_buf))
+    }
+
+    fn read_pkt_content(&mut self) -> Result<Vec<u8>, Error> {
+        let mut content = Vec::new();
+        while let Some(mut packet) = self.read_pkt_line()? {
+            content.append(&mut packet);
+        }
+        Ok(content)
+    }
+}
+
+struct PktLineProcess {
+    pkt_io: PktLineIO,
+    repo: GitRepository,
+    config: GitConfig,
+    keypair: KeyPair,
+}
+
+impl PktLineProcess {
+    fn new() -> Result<Self, Error> {
+        let repo = GitRepository::new()?;
+        let config = load_git_config(&repo)?;
+        let keypair = KeyPair::try_from(&config)?;
+
+        Ok(PktLineProcess {
+            pkt_io: PktLineIO::new(),
+            repo,
+            config,
+            keypair,
+        })
+    }
+
+    fn handshake_version(&mut self) -> Result<(), Error> {
+        let Some(header) = self.pkt_io.read_pkt_line()? else {
+            return Err(Error::UnexpectedEof);
+        };
+        if !header.eq(b"git-filter-client") {
+            return Err(Error::InvalidHandshakePayload(header));
+        }
+        self.pkt_io.write_pkt_line(b"git-filter-server")?;
+
+        let mut valid_version = false;
+        while let Some(payload) = self.pkt_io.read_pkt_line()? {
+            match payload.as_slice() {
+                b"version=2" => valid_version = true,
+                p => {
+                    // eprintln!("Unknown handshake packet: {}", String::from_utf8_lossy(p));
+                }
+            }
+        }
+        if valid_version {
+            self.pkt_io.write_pkt_line(b"git-filter-server")?;
+            self.pkt_io.write_pkt_line(b"version=2")?;
+            self.pkt_io.write_flush_pkt()?;
+            Ok(())
+        } else {
+            Err(Error::InvalidVersion)
+        }
+    }
+
+    fn handshake_capabilities(&mut self) -> Result<(), Error> {
+        let mut capabilities = Vec::new();
+        const CAPABILITY_PREFIX: &[u8] = b"capability=";
+        const USABLE_CAPABILITIES: &[&[u8]] = &[b"clean", b"smudge"];
+        while let Some(payload) = self.pkt_io.read_pkt_line()? {
+            match payload.split_at(CAPABILITY_PREFIX.len()) {
+                (CAPABILITY_PREFIX, rest) => capabilities.push(rest.to_vec()),
+                _ => {
+                    // eprintln!("Unknown packet: {}", String::from_utf8_lossy(p));
+                }
+            }
+        }
+        for cap in USABLE_CAPABILITIES {
+            if capabilities.iter().any(|c| c.as_slice() == *cap) {
+                let response = [CAPABILITY_PREFIX, cap].concat();
+                self.pkt_io.write_pkt_line(&response)?;
+            }
+        }
+        self.pkt_io.write_flush_pkt()?;
+        Ok(())
+    }
+
+    fn handshake(&mut self) -> Result<(), Error> {
+        self.handshake_version()?;
+        self.handshake_capabilities()?;
+        Ok(())
+    }
+
+    fn command_clean(&mut self) -> Result<(), Error> {
+        let mut pathname = None;
+        const PATHNAME_PREFIX: &[u8] = b"pathname=";
+        while let Some(payload) = self.pkt_io.read_pkt_line()? {
+            match payload.as_slice().split_at(PATHNAME_PREFIX.len()) {
+                (PATHNAME_PREFIX, rest) => pathname = Some(rest.to_vec()),
+                _ => {
+                    // eprintln!("Unknown command: {}", String::from_utf8_lossy(p));
+                }
+            }
+        }
+
+        let Some(pathname) = pathname else {
+            return Err(Error::PathnameIsMissing);
+        };
+
+        let data = self.pkt_io.read_pkt_content()?;
+        let pathstring =
+            String::from_utf8(pathname.clone()).map_err(|_| Error::InvalidPathname(pathname))?;
+        let path = Path::new(pathstring.as_str());
+
+        let encrypted = encrypt(&self.keypair, &mut self.config, &data, path, &mut self.repo)?;
+        self.pkt_io.write_pkt_content(&encrypted)?;
+        self.pkt_io.write_flush_pkt()?;
+        Ok(())
+    }
 }
