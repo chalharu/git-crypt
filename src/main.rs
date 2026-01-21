@@ -2,7 +2,9 @@ use std::{
     collections::{HashMap, HashSet},
     env::current_dir,
     fs,
-    io::{self, BufReader, BufWriter, ErrorKind, Read as _, Seek, StdinLock, StdoutLock, Write as _},
+    io::{
+        self, BufReader, BufWriter, ErrorKind, Read as _, Seek, StdinLock, StdoutLock, Write as _,
+    },
     path::{Path, PathBuf},
 };
 
@@ -598,9 +600,10 @@ fn pre_auto_gc() -> Result<(), Error> {
         if let Some(name) = reference.name() {
             let parts: Vec<&str> = name.split('/').collect();
             // refs/crypt-cache/{type}/{oid}
-            if parts.len() == 4 {
+            if parts.len() == 4
+                && let Some(target_oid) = reference.target()
+            {
                 let oid_str = parts[3];
-                let target_oid = reference.target().unwrap();
                 let key = crypt_cache_paths.len();
                 crypt_cache_paths.insert(key, name.to_string());
                 weak_map
