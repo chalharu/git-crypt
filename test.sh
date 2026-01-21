@@ -25,6 +25,14 @@ from_hex() {
     echo "$(( VAL ))"
 }
 
+get_filesize() {
+    # MacOS/BSD環境
+    _RET=$(stat -f "%z" "$1" 2>/dev/null) && { echo "$_RET"; return; }
+    # Linux環境
+    _RET=$(stat -c '%s' "$1" 2>/dev/null) && { echo "$_RET"; return; }
+    return 1
+}
+
 set -u
 
 # プロジェクトのビルド
@@ -438,6 +446,83 @@ if ! "$GIT_CRYPT" pre-auto-gc; then
   exit 1
 fi
 echo "PASS: pre-auto-gc hook"
+echo ""
+
+# テスト10: gitコマンドと統合テスト
+echo "=== Test 10: Git integration test ==="
+
+cd "$TMPDIR/repo"
+
+# フィルタをセットアップ
+echo "*.txt filter=crypt binary" > .gitattributes
+git config filter.crypt.process "\"$GIT_CRYPT\" process"
+git config filter.crypt.required true
+
+# ファイルを追加してコミット
+echo "Setting up test file and committing..."
+mkdir -p secret
+printf "$PLAINTEXT\n\n\n\n\n" > secret/secret.txt # 末尾改行が複数ある通常のファイル
+printf "$PLAINTEXT\n\n\n\x00\n\n\n" > secret/secret2.txt # NULLバイトを含むファイル
+get_head 131073 /dev/urandom > secret/secret3.txt # 128KB超のファイル
+
+ORIGINAL_SIZE=$(get_filesize secret/secret.txt)
+ORIGINAL2_SIZE=$(get_filesize secret/secret2.txt)
+ORIGINAL3_SIZE=$(get_filesize secret/secret3.txt)
+ls -l secret/secret.txt secret/secret2.txt secret/secret3.txt
+echo "--- Adding files to git index... ---"
+git add secret/*.txt
+echo "--- Committing files... ---"
+git commit -m "Add secret.txt and secret2.txt secret3.txt"
+
+
+# ファイルの内容を確認
+STORED_CONTENT_HASH=$(git rev-parse HEAD:secret/secret.txt)
+if ! git cat-file -p "$STORED_CONTENT_HASH" | grep -E '\-----BEGIN PGP MESSAGE-----' > /dev/null; then
+    echo "FAIL: committed file is not encrypted" >&2
+    exit 1
+fi
+
+# ファイルの内容を確認
+STORED_CONTENT_HASH=$(git rev-parse HEAD:secret/secret2.txt)
+if ! git cat-file -p "$STORED_CONTENT_HASH" | grep -E '\-----BEGIN PGP MESSAGE-----' > /dev/null; then
+    echo "FAIL: committed file is not encrypted" >&2
+    exit 1
+fi
+
+# ファイルをチェックアウトして復号化を確認
+rm -f secret/secret.txt # ワーキングツリーから削除
+rm -f secret/secret2.txt # ワーキングツリーから削除
+mv secret/secret3.txt secret/secret3.txt.bak
+echo "--- Checking out files... ---"
+git checkout HEAD -- .
+if ! grep -F "$PLAINTEXT" secret/secret.txt > /dev/null; then
+    echo "FAIL: checked out file content mismatch" >&2
+    exit 1
+fi
+if ! grep -F "$PLAINTEXT" secret/secret2.txt > /dev/null; then
+    echo "FAIL: checked out file content mismatch" >&2
+    exit 1
+fi
+if ! diff -u secret/secret3.txt.bak secret/secret3.txt > /dev/null; then
+    echo "FAIL: checked out large file content mismatch" >&2
+    exit 1
+fi
+
+# チェックアウトしたファイルのサイズ確認
+# 改行等が勝手に変更されていないか確認
+if [ $(get_filesize secret/secret.txt) -ne $ORIGINAL_SIZE ]; then
+    echo "FAIL: checked out file size mismatch" >&2
+    exit 1
+fi
+if [ $(get_filesize secret/secret2.txt) -ne $ORIGINAL2_SIZE ]; then
+    echo "FAIL: checked out file size mismatch" >&2
+exit 1
+fi
+if [ $(get_filesize secret/secret3.txt) -ne $ORIGINAL3_SIZE ]; then
+    echo "FAIL: checked out file size mismatch" >&2
+exit 1
+fi
+echo "PASS: Git integration test"
 echo ""
 
 echo "All tests passed."
