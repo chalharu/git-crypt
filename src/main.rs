@@ -89,24 +89,32 @@ fn main() {
             .init()
             .unwrap();
         log::debug!("Debug mode is enabled");
+    } else {
+        stderrlog::new()
+            .module(module_path!())
+            .verbosity(0)
+            .timestamp(stderrlog::Timestamp::Off)
+            .show_level(false)
+            .init()
+            .unwrap();
     }
 
     match cli.command {
         Commands::Clean { file_path } => {
             if let Err(e) = clean(Path::new(&file_path)) {
-                eprintln!("Error during clean: {}", e);
+                log::error!("Error during clean: {}", e);
                 std::process::exit(1);
             }
         }
         Commands::Smudge { file_path } => {
             if let Err(e) = smudge(Path::new(&file_path)) {
-                eprintln!("Error during smudge: {:?}", e);
+                log::error!("Error during smudge: {:?}", e);
                 std::process::exit(1);
             }
         }
         Commands::Textconv { file_path } => {
             if let Err(e) = textconv(Path::new(&file_path)) {
-                eprintln!("Error during textconv: {}", e);
+                log::error!("Error during textconv: {}", e);
                 std::process::exit(1);
             }
         }
@@ -126,20 +134,20 @@ fn main() {
             ) {
                 Ok(is_automergeable) => std::process::exit(if is_automergeable { 0 } else { 1 }),
                 Err(e) => {
-                    eprintln!("Error during merge: {}", e);
+                    log::error!("Error during merge: {}", e);
                     std::process::exit(2);
                 }
             }
         }
         Commands::PreCommit => {
             if let Err(e) = pre_commit() {
-                eprintln!("Pre-commit hook failed: {}", e);
+                log::error!("Pre-commit hook failed: {}", e);
                 std::process::exit(1);
             }
         }
         Commands::PreAutoGc => {
             if let Err(e) = pre_auto_gc() {
-                eprintln!("Pre-auto-gc hook failed: {}", e);
+                log::error!("Pre-auto-gc hook failed: {}", e);
                 std::process::exit(1);
             }
         }
@@ -147,13 +155,13 @@ fn main() {
             let mut processor = match PktLineProcess::new() {
                 Ok(p) => p,
                 Err(e) => {
-                    eprintln!("Error during initialization: {}", e);
+                    log::error!("Error during initialization: {}", e);
                     std::process::exit(1);
                 }
             };
 
             if let Err(e) = processor.process() {
-                eprintln!("Error during process: {}", e);
+                log::error!("Error during process: {}", e);
                 std::process::exit(1);
             }
         }
@@ -177,7 +185,7 @@ enum Error {
     #[error("File '{0}' is not encrypted. Clean filter may not be working.")]
     NotEncrypted(PathBuf),
     #[error("Invalid handshake payload: {0:?}")]
-    InvalidHandshakePayload(Vec<u8>),
+    InvalidHandshakePayload(String),
     #[error("Unexpected end of file")]
     UnexpectedEof,
     #[error("Invalid version")]
@@ -188,6 +196,8 @@ enum Error {
     InvalidPathname(Vec<u8>),
     #[error("Invalid packet length")]
     InvalidPacketLength,
+    #[error("Invalid packet UTF-8: {0}")]
+    InvalidPacketUtf8(#[from] std::string::FromUtf8Error),
 }
 
 #[derive(Debug)]
@@ -474,7 +484,7 @@ fn decrypt(
             // パケットが不正 = 暗号化されていない場合はそのまま出力
             // 本来は平文と破損を区別したいが、現状では区別できないためそのまま出力
             if config.is_encryption(path).unwrap_or(false) {
-                eprintln!("Not a valid PGP message ({:?}), outputting raw data", e);
+                log::error!("Not a valid PGP message ({:?}), outputting raw data", e);
             }
             return Ok(data.to_vec());
         }
@@ -656,7 +666,7 @@ fn pre_auto_gc() -> Result<(), Error> {
     // 残ったcrypt-cache参照を削除
     for (_, ref_name) in crypt_cache_paths {
         if let Ok(mut reference) = repo.repo.find_reference(&ref_name) {
-            eprintln!("Deleting unused reference: {}", ref_name);
+            log::error!("Deleting unused reference: {}", ref_name);
             // エラーが発生しても無視
             let _ = reference.delete();
         }
@@ -738,10 +748,44 @@ impl PktLineReadResult {
             PktLineReadResult::Eof => Err(Error::UnexpectedEof),
         }
     }
+}
 
-    fn into_packet(self) -> Result<Vec<u8>, Error> {
+enum PktLineTextResult {
+    Packet(String),
+    Flush,
+    Eof,
+}
+
+impl TryFrom<PktLineReadResult> for PktLineTextResult {
+    type Error = Error;
+
+    fn try_from(value: PktLineReadResult) -> Result<Self, Self::Error> {
+        match value {
+            PktLineReadResult::Packet(data) => {
+                let mut text = String::from_utf8(data)?;
+                if text.ends_with('\n') {
+                    text.truncate(text.len() - 1);
+                }
+                Ok(PktLineTextResult::Packet(text))
+            }
+            PktLineReadResult::Flush => Ok(PktLineTextResult::Flush),
+            PktLineReadResult::Eof => Ok(PktLineTextResult::Eof),
+        }
+    }
+}
+
+impl PktLineTextResult {
+    fn without_eof(self) -> Result<Option<String>, Error> {
         match self {
-            PktLineReadResult::Packet(data) => Ok(data),
+            PktLineTextResult::Packet(data) => Ok(Some(data)),
+            PktLineTextResult::Flush => Ok(None),
+            PktLineTextResult::Eof => Err(Error::UnexpectedEof),
+        }
+    }
+
+    fn into_packet(self) -> Result<String, Error> {
+        match self {
+            PktLineTextResult::Packet(data) => Ok(data),
             _ => Err(Error::UnexpectedEof),
         }
     }
@@ -764,13 +808,27 @@ impl PktLineIO {
     fn write_pkt_line(&mut self, data: &[u8]) -> Result<(), Error> {
         let length = data.len() + 4; // 4 bytes for length prefix
         let length_str = format!("{:04x}", length);
+        log::debug!(
+            "Writing pkt-line: {}",
+            data[..50.min(data.len())].escape_ascii()
+        );
         self.writer.write_all(length_str.as_bytes())?;
         self.writer.write_all(data)?;
         Ok(())
     }
 
+    fn write_pkt_string(&mut self, data: &str) -> Result<(), Error> {
+        if data.ends_with('\n') {
+            self.write_pkt_line(data.as_bytes())
+        } else {
+            let mut line = data.to_string();
+            line.push('\n');
+            self.write_pkt_line(line.as_bytes())
+        }
+    }
+
     fn write_pkt_content(&mut self, data: &[u8]) -> Result<(), Error> {
-        self.write_pkt_line(b"status=success")?;
+        self.write_pkt_string("status=success")?;
         self.write_flush_pkt()?;
 
         const LARGE_PACKET_MAX: usize = 65520;
@@ -785,6 +843,7 @@ impl PktLineIO {
     }
 
     fn write_flush_pkt(&mut self) -> Result<(), Error> {
+        log::debug!("Writing pkt-line: 0000 (flush)");
         self.writer.write_all(b"0000")?;
         self.writer.flush()?;
         Ok(())
@@ -814,6 +873,7 @@ impl PktLineIO {
             )?;
 
         if pkt_length == 0 {
+            log::debug!("Received pkt-line: 0000 (flush)");
             return Ok(PktLineReadResult::Flush); // Flush packet
         }
 
@@ -822,6 +882,10 @@ impl PktLineIO {
         }
         let mut data_buf = vec![0u8; pkt_length - 4];
         self.reader.read_exact(&mut data_buf)?;
+        log::debug!(
+            "Received pkt-line: {}",
+            data_buf[..50.min(data_buf.len())].escape_ascii()
+        );
         Ok(PktLineReadResult::Packet(data_buf))
     }
 
@@ -831,6 +895,10 @@ impl PktLineIO {
             content.append(&mut packet);
         }
         Ok(content)
+    }
+
+    fn read_pkt_line_text(&mut self) -> Result<PktLineTextResult, Error> {
+        PktLineTextResult::try_from(self.read_pkt_line()?)
     }
 }
 
@@ -856,24 +924,24 @@ impl PktLineProcess {
     }
 
     fn handshake_version(&mut self) -> Result<(), Error> {
-        let header = self.pkt_io.read_pkt_line()?.into_packet()?;
-        if !header.eq(b"git-filter-client") {
+        let header = self.pkt_io.read_pkt_line_text()?.into_packet()?;
+        if !header.eq("git-filter-client") {
             return Err(Error::InvalidHandshakePayload(header));
         }
-        self.pkt_io.write_pkt_line(b"git-filter-server")?;
+        self.pkt_io.write_pkt_string("git-filter-server")?;
 
         let mut valid_version = false;
 
-        while let Some(payload) = self.pkt_io.read_pkt_line()?.without_eof()? {
-            match payload.as_slice() {
-                b"version=2" => valid_version = true,
+        while let Some(payload) = self.pkt_io.read_pkt_line_text()?.without_eof()? {
+            match payload.as_str() {
+                "version=2" => valid_version = true,
                 _ => {
-                    // eprintln!("Unknown handshake packet: {}", String::from_utf8_lossy(p));
+                    log::warn!("Unknown handshake packet: {}", payload);
                 }
             }
         }
         if valid_version {
-            self.pkt_io.write_pkt_line(b"version=2")?;
+            self.pkt_io.write_pkt_string("version=2")?;
             self.pkt_io.write_flush_pkt()?;
             Ok(())
         } else {
@@ -883,19 +951,21 @@ impl PktLineProcess {
 
     fn handshake_capabilities(&mut self) -> Result<(), Error> {
         let mut capabilities = Vec::new();
-        const CAPABILITY_PREFIX: &[u8] = b"capability=";
-        const USABLE_CAPABILITIES: &[&[u8]] = &[b"clean", b"smudge"];
-        while let Some(payload) = self.pkt_io.read_pkt_line()?.without_eof()? {
+        const CAPABILITY_PREFIX: &str = "capability=";
+        const USABLE_CAPABILITIES: &[&str] = &["clean", "smudge"];
+        while let Some(payload) =
+            PktLineTextResult::try_from(self.pkt_io.read_pkt_line()?)?.without_eof()?
+        {
             if payload.starts_with(CAPABILITY_PREFIX) {
-                capabilities.push(payload.split_at(CAPABILITY_PREFIX.len()).1.to_vec())
-                // } else {
-                //     eprintln!("Unknown packet: {}", String::from_utf8_lossy(p));
+                capabilities.push(payload.split_at(CAPABILITY_PREFIX.len()).1.to_string())
+            } else {
+                log::warn!("Unknown packet: {}", payload);
             }
         }
         for cap in USABLE_CAPABILITIES {
-            if capabilities.iter().any(|c| c.as_slice() == *cap) {
+            if capabilities.iter().any(|c| *c == *cap) {
                 let response = [CAPABILITY_PREFIX, cap].concat();
-                self.pkt_io.write_pkt_line(&response)?;
+                self.pkt_io.write_pkt_string(&response)?;
             }
         }
         self.pkt_io.write_flush_pkt()?;
@@ -909,7 +979,7 @@ impl PktLineProcess {
     }
 
     fn write_error_response(&mut self, e: Error) -> Error {
-        let _ = self.pkt_io.write_pkt_line(b"status=error");
+        let _ = self.pkt_io.write_pkt_string("status=error");
         let _ = self.pkt_io.write_flush_pkt();
         e
     }
@@ -920,8 +990,8 @@ impl PktLineProcess {
         while let Some(payload) = self.pkt_io.read_pkt_line()?.without_eof()? {
             if payload.starts_with(PATHNAME_PREFIX) {
                 pathname = Some(payload.split_at(PATHNAME_PREFIX.len()).1.to_vec());
-                // } else {
-                //     eprintln!("Unknown command: {}", String::from_utf8_lossy(p));
+            } else {
+                log::warn!("Unknown command: {}", String::from_utf8_lossy(&payload));
             }
         }
 
@@ -943,12 +1013,14 @@ impl PktLineProcess {
 
     fn command_smudge(&mut self) -> Result<(), Error> {
         let mut pathname = None;
-        const PATHNAME_PREFIX: &[u8] = b"pathname=";
-        while let Some(payload) = self.pkt_io.read_pkt_line()?.without_eof()? {
+        const PATHNAME_PREFIX: &str = "pathname=";
+        while let Some(payload) =
+            PktLineTextResult::try_from(self.pkt_io.read_pkt_line()?)?.without_eof()?
+        {
             if payload.starts_with(PATHNAME_PREFIX) {
-                pathname = Some(payload.split_at(PATHNAME_PREFIX.len()).1.to_vec());
-                // } else {
-                //     eprintln!("Unknown command: {}", String::from_utf8_lossy(p));
+                pathname = Some(payload.split_at(PATHNAME_PREFIX.len()).1.to_string());
+            } else {
+                log::warn!("Unknown command arguments: {}", payload);
             }
         }
 
@@ -957,9 +1029,7 @@ impl PktLineProcess {
         };
 
         let data = self.pkt_io.read_pkt_content()?;
-        let pathstring = String::from_utf8(pathname.clone())
-            .map_err(|_| self.write_error_response(Error::InvalidPathname(pathname)))?;
-        let path = Path::new(pathstring.as_str());
+        let path = Path::new(pathname.as_str());
 
         let decrypted = decrypt(&self.keypair, &data, &mut self.repo, path, &mut self.config)
             .map_err(|e| self.write_error_response(e))?;
@@ -970,16 +1040,20 @@ impl PktLineProcess {
 
     fn command(&mut self) -> Result<(), Error> {
         // Flush or EOFで終了するまでコマンドを処理
-        while let PktLineReadResult::Packet(payload) = self.pkt_io.read_pkt_line()? {
-            match payload.as_slice() {
-                b"command=clean" => {
+        while let PktLineTextResult::Packet(payload) =
+            PktLineTextResult::try_from(self.pkt_io.read_pkt_line()?)?
+        {
+            match payload.as_str() {
+                "command=clean" => {
+                    log::debug!("Processing clean command");
                     let _ = self.command_clean();
                 }
-                b"command=smudge" => {
+                "command=smudge" => {
+                    log::debug!("Processing smudge command");
                     let _ = self.command_smudge();
                 }
                 _ => {
-                    // eprintln!("Unknown command: {}", String::from_utf8_lossy(p));
+                    log::warn!("Unknown command: {}", payload);
                     self.pkt_io.write_pkt_line(b"status=error")?;
                     self.pkt_io.write_flush_pkt()?;
                 }

@@ -34,6 +34,17 @@ get_filesize() {
 }
 
 set -u
+LC_ALL=C
+
+# cargoとjqの存在確認
+if ! command -v cargo >/dev/null 2>&1; then
+    echo "cargo is not installed"
+    exit 1
+fi
+if ! command -v jq >/dev/null 2>&1; then
+    echo "jq is not installed"
+    exit 1
+fi
 
 # プロジェクトのビルド
 if ! CARGO_RESULT=$(cargo build --release --message-format=json); then
@@ -41,7 +52,13 @@ if ! CARGO_RESULT=$(cargo build --release --message-format=json); then
     exit 1
 fi
 
-GIT_CRYPT=$(echo "$CARGO_RESULT" | jq -r 'select(.profile.test == false and .target.kind[] == "bin") | .executable')
+if ! GIT_CRYPT=$(printf "%s" "$CARGO_RESULT" | jq -r 'select(.profile.test == false and .target.kind[] == "bin") | .executable'); then
+    echo "Failed to get git-crypt executable path"
+    exit 1
+fi
+
+echo "Using git-crypt executable at: $GIT_CRYPT"
+echo ""
 
 # 一時ディレクトリの作成とクリーンアップの設定
 TMPDIR=$(mktemp -d)
@@ -318,7 +335,7 @@ PROCESS_OUTPUT="$TMPDIR/process_output"
     PAYLOAD_LEN=$((${#PLAINTEXT} + 4))
     printf '%04x%s' "$PAYLOAD_LEN" "$PLAINTEXT"
     printf "0000"
-} | "$GIT_CRYPT" process > "$PROCESS_OUTPUT"
+} | "$GIT_CRYPT" --debug process > "$PROCESS_OUTPUT"
 
 if [ $? -ne 0 ]; then
     echo "FAIL: process command returned non-zero" >&2
@@ -331,16 +348,19 @@ if ! grep -E '\-----BEGIN PGP MESSAGE-----' "$PROCESS_OUTPUT" > /dev/null; then
 fi
 
 # 受信データを分解
-HEADER="0015git-filter-server000dversion=200000014capability=clean00000012status=success"
+HEADER="0016git-filter-server\n000eversion=2\n00000015capability=clean\n00000013status=success\n"
 HEADER_LEN="${#HEADER}"
+HEADER_LEN=$(printf "${HEADER}" | wc -c)
+HEADER=$(printf "${HEADER}")
+echo "Header length: $HEADER_LEN"
 PROCESS_OUTPUT_HEADER=$(get_head "$HEADER_LEN" "$PROCESS_OUTPUT")
 
 if [ "$PROCESS_OUTPUT_HEADER" != "$HEADER" ]; then
   echo "FAIL: process command (clean) header mismatch" >&2
   echo "Expected:"
-  echo "$HEADER"
+  printf "%q\n" "$HEADER"
   echo "Actual:"
-  echo "$PROCESS_OUTPUT_HEADER"
+  printf "%q\n" "$PROCESS_OUTPUT_HEADER"
   exit 1
 fi
 
@@ -401,8 +421,11 @@ if [ $? -ne 0 ]; then
 fi
 
 # 受信データを分解
-HEADER="0015git-filter-server000dversion=200000015capability=smudge00000012status=success"
+HEADER="0016git-filter-server\n000eversion=2\n00000016capability=smudge\n00000013status=success\n"
 HEADER_LEN="${#HEADER}"
+HEADER_LEN=$(printf "${HEADER}" | wc -c)
+HEADER=$(printf "${HEADER}")
+echo "Header length: $HEADER_LEN"
 PROCESS_OUTPUT_HEADER=$(get_head "$HEADER_LEN" "$PROCESS_OUTPUT")
 
 if [ "$PROCESS_OUTPUT_HEADER" != "$HEADER" ]; then
@@ -455,7 +478,7 @@ cd "$TMPDIR/repo"
 
 # フィルタをセットアップ
 echo "*.txt filter=crypt binary" > .gitattributes
-git config filter.crypt.process "\"$GIT_CRYPT\" process"
+git config filter.crypt.process "\"$GIT_CRYPT\" --debug process"
 git config filter.crypt.required true
 
 # ファイルを追加してコミット
