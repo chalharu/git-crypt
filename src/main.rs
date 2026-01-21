@@ -706,6 +706,12 @@ struct PktLineIO {
     writer: BufWriter<StdoutLock<'static>>,
 }
 
+enum PktLineReadResult {
+    Packet(Vec<u8>),
+    Flush,
+    Eof,
+}
+
 impl PktLineIO {
     fn new() -> Self {
         let reader = std::io::stdin().lock();
@@ -749,11 +755,11 @@ impl PktLineIO {
         Ok(())
     }
 
-    fn read_pkt_line(&mut self) -> Result<Option<Vec<u8>>, Error> {
+    fn read_pkt_line(&mut self) -> Result<PktLineReadResult, Error> {
         let mut length_buf = [0u8; 4];
         if let Err(e) = self.reader.read_exact(&mut length_buf) {
             if e.kind() == ErrorKind::UnexpectedEof {
-                return Ok(None); // EOF reached
+                return Ok(PktLineReadResult::Eof); // EOF reached
             } else {
                 return Err(Error::Io(e));
             }
@@ -773,17 +779,17 @@ impl PktLineIO {
             )?;
 
         if pkt_length == 0 {
-            return Ok(None); // Flush packet
+            return Ok(PktLineReadResult::Flush); // Flush packet
         }
 
         let mut data_buf = vec![0u8; pkt_length - 4];
         self.reader.read_exact(&mut data_buf)?;
-        Ok(Some(data_buf))
+        Ok(PktLineReadResult::Packet(data_buf))
     }
 
     fn read_pkt_content(&mut self) -> Result<Vec<u8>, Error> {
         let mut content = Vec::new();
-        while let Some(mut packet) = self.read_pkt_line()? {
+        while let PktLineReadResult::Packet(mut packet) = self.read_pkt_line()? {
             content.append(&mut packet);
         }
         Ok(content)
@@ -812,7 +818,8 @@ impl PktLineProcess {
     }
 
     fn handshake_version(&mut self) -> Result<(), Error> {
-        let Some(header) = self.pkt_io.read_pkt_line()? else {
+        let PktLineReadResult::Packet(header) = self.pkt_io.read_pkt_line()? else {
+            // Flush or Eof
             return Err(Error::UnexpectedEof);
         };
         if !header.eq(b"git-filter-client") {
@@ -821,7 +828,7 @@ impl PktLineProcess {
         self.pkt_io.write_pkt_line(b"git-filter-server")?;
 
         let mut valid_version = false;
-        while let Some(payload) = self.pkt_io.read_pkt_line()? {
+        while let PktLineReadResult::Packet(payload) = self.pkt_io.read_pkt_line()? {
             match payload.as_slice() {
                 b"version=2" => valid_version = true,
                 _ => {
@@ -842,7 +849,7 @@ impl PktLineProcess {
         let mut capabilities = Vec::new();
         const CAPABILITY_PREFIX: &[u8] = b"capability=";
         const USABLE_CAPABILITIES: &[&[u8]] = &[b"clean", b"smudge"];
-        while let Some(payload) = self.pkt_io.read_pkt_line()? {
+        while let PktLineReadResult::Packet(payload) = self.pkt_io.read_pkt_line()? {
             match payload.split_at(CAPABILITY_PREFIX.len()) {
                 (CAPABILITY_PREFIX, rest) => capabilities.push(rest.to_vec()),
                 _ => {
@@ -875,7 +882,7 @@ impl PktLineProcess {
     fn command_clean(&mut self) -> Result<(), Error> {
         let mut pathname = None;
         const PATHNAME_PREFIX: &[u8] = b"pathname=";
-        while let Some(payload) = self.pkt_io.read_pkt_line()? {
+        while let PktLineReadResult::Packet(payload) = self.pkt_io.read_pkt_line()? {
             match payload.as_slice().split_at(PATHNAME_PREFIX.len()) {
                 (PATHNAME_PREFIX, rest) => pathname = Some(rest.to_vec()),
                 _ => {
@@ -903,7 +910,7 @@ impl PktLineProcess {
     fn command_smudge(&mut self) -> Result<(), Error> {
         let mut pathname = None;
         const PATHNAME_PREFIX: &[u8] = b"pathname=";
-        while let Some(payload) = self.pkt_io.read_pkt_line()? {
+        while let PktLineReadResult::Packet(payload) = self.pkt_io.read_pkt_line()? {
             match payload.as_slice().split_at(PATHNAME_PREFIX.len()) {
                 (PATHNAME_PREFIX, rest) => pathname = Some(rest.to_vec()),
                 _ => {
@@ -929,7 +936,7 @@ impl PktLineProcess {
     }
 
     fn command(&mut self) -> Result<(), Error> {
-        while let Some(payload) = self.pkt_io.read_pkt_line()? {
+        while let PktLineReadResult::Packet(payload) = self.pkt_io.read_pkt_line()? {
             match payload.as_slice() {
                 b"command=clean" => {
                     let _ = self.command_clean();
