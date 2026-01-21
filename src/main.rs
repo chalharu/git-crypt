@@ -18,7 +18,7 @@ use pgp::{
         SignedPublicKey, SignedSecretKey, TheRing,
     },
     crypto::sym::SymmetricKeyAlgorithm,
-    types::{CompressionAlgorithm, Imprint, KeyDetails, PublicKeyTrait},
+    types::{CompressionAlgorithm, KeyDetails, PublicKeyTrait},
 };
 use regex::Regex;
 
