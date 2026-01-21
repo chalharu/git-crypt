@@ -172,6 +172,8 @@ enum Error {
     PathnameIsMissing,
     #[error("Invalid pathname: {0:?}")]
     InvalidPathname(Vec<u8>),
+    #[error("Invalid packet length")]
+    InvalidPacketLength,
 }
 
 #[derive(Debug)]
@@ -799,6 +801,9 @@ impl PktLineIO {
             return Ok(PktLineReadResult::Flush); // Flush packet
         }
 
+        if pkt_length < 4 {
+            return Err(Error::InvalidPacketLength);
+        }
         let mut data_buf = vec![0u8; pkt_length - 4];
         self.reader.read_exact(&mut data_buf)?;
         Ok(PktLineReadResult::Packet(data_buf))
