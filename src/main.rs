@@ -82,7 +82,13 @@ fn main() {
 
     if cli.debug {
         // TODO: Implement debug trace output
-        eprintln!("Debug mode is enabled");
+        stderrlog::new()
+            .module(module_path!())
+            .verbosity(3)
+            .timestamp(stderrlog::Timestamp::Second)
+            .init()
+            .unwrap();
+        log::debug!("Debug mode is enabled");
     }
 
     match cli.command {
