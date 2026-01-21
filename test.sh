@@ -436,3 +436,5 @@ if ! "$GIT_CRYPT" pre-auto-gc; then
 fi
 echo "PASS: pre-auto-gc hook"
 echo ""
+
+echo "All tests passed."
