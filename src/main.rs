@@ -712,6 +712,23 @@ enum PktLineReadResult {
     Eof,
 }
 
+impl PktLineReadResult {
+    fn without_eof(self) -> Result<Option<Vec<u8>>, Error> {
+        match self {
+            PktLineReadResult::Packet(data) => Ok(Some(data)),
+            PktLineReadResult::Flush => Ok(None),
+            PktLineReadResult::Eof => Err(Error::UnexpectedEof),
+        }
+    }
+
+    fn into_packet(self) -> Result<Vec<u8>, Error> {
+        match self {
+            PktLineReadResult::Packet(data) => Ok(data),
+            _ => Err(Error::UnexpectedEof),
+        }
+    }
+}
+
 impl PktLineIO {
     fn new() -> Self {
         let reader = std::io::stdin().lock();
@@ -789,7 +806,7 @@ impl PktLineIO {
 
     fn read_pkt_content(&mut self) -> Result<Vec<u8>, Error> {
         let mut content = Vec::new();
-        while let PktLineReadResult::Packet(mut packet) = self.read_pkt_line()? {
+        while let Some(mut packet) = self.read_pkt_line()?.without_eof()? {
             content.append(&mut packet);
         }
         Ok(content)
@@ -818,17 +835,15 @@ impl PktLineProcess {
     }
 
     fn handshake_version(&mut self) -> Result<(), Error> {
-        let PktLineReadResult::Packet(header) = self.pkt_io.read_pkt_line()? else {
-            // Flush or Eof
-            return Err(Error::UnexpectedEof);
-        };
+        let header = self.pkt_io.read_pkt_line()?.into_packet()?;
         if !header.eq(b"git-filter-client") {
             return Err(Error::InvalidHandshakePayload(header));
         }
         self.pkt_io.write_pkt_line(b"git-filter-server")?;
 
         let mut valid_version = false;
-        while let PktLineReadResult::Packet(payload) = self.pkt_io.read_pkt_line()? {
+
+        while let Some(payload) = self.pkt_io.read_pkt_line()?.without_eof()? {
             match payload.as_slice() {
                 b"version=2" => valid_version = true,
                 _ => {
@@ -849,12 +864,11 @@ impl PktLineProcess {
         let mut capabilities = Vec::new();
         const CAPABILITY_PREFIX: &[u8] = b"capability=";
         const USABLE_CAPABILITIES: &[&[u8]] = &[b"clean", b"smudge"];
-        while let PktLineReadResult::Packet(payload) = self.pkt_io.read_pkt_line()? {
-            match payload.split_at(CAPABILITY_PREFIX.len()) {
-                (CAPABILITY_PREFIX, rest) => capabilities.push(rest.to_vec()),
-                _ => {
-                    // eprintln!("Unknown packet: {}", String::from_utf8_lossy(p));
-                }
+        while let Some(payload) = self.pkt_io.read_pkt_line()?.without_eof()? {
+            if payload.starts_with(CAPABILITY_PREFIX) {
+                capabilities.push(payload.split_at(CAPABILITY_PREFIX.len()).1.to_vec())
+                // } else {
+                //     eprintln!("Unknown packet: {}", String::from_utf8_lossy(p));
             }
         }
         for cap in USABLE_CAPABILITIES {
@@ -882,12 +896,11 @@ impl PktLineProcess {
     fn command_clean(&mut self) -> Result<(), Error> {
         let mut pathname = None;
         const PATHNAME_PREFIX: &[u8] = b"pathname=";
-        while let PktLineReadResult::Packet(payload) = self.pkt_io.read_pkt_line()? {
-            match payload.as_slice().split_at(PATHNAME_PREFIX.len()) {
-                (PATHNAME_PREFIX, rest) => pathname = Some(rest.to_vec()),
-                _ => {
-                    // eprintln!("Unknown command: {}", String::from_utf8_lossy(p));
-                }
+        while let Some(payload) = self.pkt_io.read_pkt_line()?.without_eof()? {
+            if payload.starts_with(PATHNAME_PREFIX) {
+                pathname = Some(payload.split_at(PATHNAME_PREFIX.len()).1.to_vec());
+                // } else {
+                //     eprintln!("Unknown command: {}", String::from_utf8_lossy(p));
             }
         }
 
@@ -910,12 +923,11 @@ impl PktLineProcess {
     fn command_smudge(&mut self) -> Result<(), Error> {
         let mut pathname = None;
         const PATHNAME_PREFIX: &[u8] = b"pathname=";
-        while let PktLineReadResult::Packet(payload) = self.pkt_io.read_pkt_line()? {
-            match payload.as_slice().split_at(PATHNAME_PREFIX.len()) {
-                (PATHNAME_PREFIX, rest) => pathname = Some(rest.to_vec()),
-                _ => {
-                    // eprintln!("Unknown command: {}", String::from_utf8_lossy(p));
-                }
+        while let Some(payload) = self.pkt_io.read_pkt_line()?.without_eof()? {
+            if payload.starts_with(PATHNAME_PREFIX) {
+                pathname = Some(payload.split_at(PATHNAME_PREFIX.len()).1.to_vec());
+                // } else {
+                //     eprintln!("Unknown command: {}", String::from_utf8_lossy(p));
             }
         }
 
@@ -936,7 +948,7 @@ impl PktLineProcess {
     }
 
     fn command(&mut self) -> Result<(), Error> {
-        while let PktLineReadResult::Packet(payload) = self.pkt_io.read_pkt_line()? {
+        while let Some(payload) = self.pkt_io.read_pkt_line()?.without_eof()? {
             match payload.as_slice() {
                 b"command=clean" => {
                     let _ = self.command_clean();
