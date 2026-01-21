@@ -138,8 +138,23 @@ fn main() {
             }
         }
         Commands::Process => {
-            // TODO: Implement debug trace output
-            println!("Processing...");
+            let pkt_io = PktLineIO::new();
+
+            let repo = GitRepository::new().unwrap();
+            let config = load_git_config(&repo).unwrap();
+            let keypair = KeyPair::try_from(&config).unwrap();
+
+            let mut processor = PktLineProcess {
+                pkt_io,
+                repo,
+                config,
+                keypair,
+            };
+
+            if let Err(e) = processor.process() {
+                eprintln!("Error during process: {}", e);
+                std::process::exit(1);
+            }
         }
     }
 }
@@ -727,6 +742,9 @@ impl PktLineIO {
     }
 
     fn write_pkt_content(&mut self, data: &[u8]) -> Result<(), Error> {
+        self.write_pkt_line(b"status=success")?;
+        self.write_flush_pkt()?;
+
         const LARGE_PACKET_MAX: usize = 65520;
         let mut offset = 0;
         while offset < data.len() {
@@ -734,6 +752,7 @@ impl PktLineIO {
             self.write_pkt_line(&data[offset..offset + chunk_size])?;
             offset += chunk_size;
         }
+        self.write_flush_pkt()?;
         Ok(())
     }
 
@@ -861,6 +880,12 @@ impl PktLineProcess {
         Ok(())
     }
 
+    fn write_error_response(&mut self, e: Error) -> Error {
+        let _ = self.pkt_io.write_pkt_line(b"status=error");
+        let _ = self.pkt_io.write_flush_pkt();
+        e
+    }
+
     fn command_clean(&mut self) -> Result<(), Error> {
         let mut pathname = None;
         const PATHNAME_PREFIX: &[u8] = b"pathname=";
@@ -874,17 +899,71 @@ impl PktLineProcess {
         }
 
         let Some(pathname) = pathname else {
-            return Err(Error::PathnameIsMissing);
+            return Err(self.write_error_response(Error::PathnameIsMissing));
         };
 
         let data = self.pkt_io.read_pkt_content()?;
-        let pathstring =
-            String::from_utf8(pathname.clone()).map_err(|_| Error::InvalidPathname(pathname))?;
+        let pathstring = String::from_utf8(pathname.clone())
+            .map_err(|_| self.write_error_response(Error::InvalidPathname(pathname)))?;
         let path = Path::new(pathstring.as_str());
 
-        let encrypted = encrypt(&self.keypair, &mut self.config, &data, path, &mut self.repo)?;
+        let encrypted = encrypt(&self.keypair, &mut self.config, &data, path, &mut self.repo)
+            .map_err(|e| self.write_error_response(e))?;
         self.pkt_io.write_pkt_content(&encrypted)?;
         self.pkt_io.write_flush_pkt()?;
+        Ok(())
+    }
+
+    fn command_smudge(&mut self) -> Result<(), Error> {
+        let mut pathname = None;
+        const PATHNAME_PREFIX: &[u8] = b"pathname=";
+        while let Some(payload) = self.pkt_io.read_pkt_line()? {
+            match payload.as_slice().split_at(PATHNAME_PREFIX.len()) {
+                (PATHNAME_PREFIX, rest) => pathname = Some(rest.to_vec()),
+                _ => {
+                    // eprintln!("Unknown command: {}", String::from_utf8_lossy(p));
+                }
+            }
+        }
+
+        let Some(pathname) = pathname else {
+            return Err(self.write_error_response(Error::PathnameIsMissing));
+        };
+
+        let data = self.pkt_io.read_pkt_content()?;
+        let pathstring = String::from_utf8(pathname.clone())
+            .map_err(|_| self.write_error_response(Error::InvalidPathname(pathname)))?;
+        let path = Path::new(pathstring.as_str());
+
+        let decrypted = decrypt(&self.keypair, &data, &mut self.repo, path, &mut self.config)
+            .map_err(|e| self.write_error_response(e))?;
+        self.pkt_io.write_pkt_content(&decrypted)?;
+        self.pkt_io.write_flush_pkt()?;
+        Ok(())
+    }
+
+    fn command(&mut self) -> Result<(), Error> {
+        while let Some(payload) = self.pkt_io.read_pkt_line()? {
+            match payload.as_slice() {
+                b"command=clean" => {
+                    let _ = self.command_clean();
+                }
+                b"command=smudge" => {
+                    let _ = self.command_smudge();
+                }
+                _ => {
+                    // eprintln!("Unknown command: {}", String::from_utf8_lossy(p));
+                    self.pkt_io.write_pkt_line(b"status=error")?;
+                    self.pkt_io.write_flush_pkt()?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn process(&mut self) -> Result<(), Error> {
+        self.handshake()?;
+        self.command()?;
         Ok(())
     }
 }
