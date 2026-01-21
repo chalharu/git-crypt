@@ -2,7 +2,7 @@ use std::{
     collections::{HashMap, HashSet},
     env::current_dir,
     fs,
-    io::{self, BufReader, BufWriter, ErrorKind, Read as _, StdinLock, StdoutLock, Write as _},
+    io::{self, BufReader, BufWriter, ErrorKind, Read as _, Seek, StdinLock, StdoutLock, Write as _},
     path::{Path, PathBuf},
 };
 
@@ -80,7 +80,7 @@ fn main() {
 
     if cli.debug {
         // TODO: Implement debug trace output
-        println!("Debug mode is enabled");
+        eprintln!("Debug mode is enabled");
     }
 
     match cli.command {
@@ -136,7 +136,13 @@ fn main() {
             }
         }
         Commands::Process => {
-            let mut processor = PktLineProcess::new().unwrap();
+            let mut processor = match PktLineProcess::new() {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("Error during initialization: {}", e);
+                    std::process::exit(1);
+                }
+            };
 
             if let Err(e) = processor.process() {
                 eprintln!("Error during process: {}", e);
@@ -696,6 +702,7 @@ fn merge(
         &mut repo,
     )?;
 
+    local_file.seek(io::SeekFrom::Start(0))?; // ファイルポインタを先頭に戻す
     local_file.set_len(0)?; // ファイルを空にする
     local_file.write_all(&encrypted)?;
     local_file.flush()?;
