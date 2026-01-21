@@ -850,7 +850,7 @@ dependencies = [
 [[package]]
 name = "git2"
 version = "0.21.0"
-source = "git+https://github.com/chalharu/git2-rs.git#082533588a49a48f84160e31933662743c4f637a"
+source = "git+https://github.com/chalharu/git2-rs.git#094a7975f387d287352b4f3c6fe4d88780958375"
 dependencies = [
  "bitflags",
  "libc",
@@ -1042,7 +1042,7 @@ checksum = "bcc35a38544a891a5f7c865aca548a982ccb3b8650a5b06d0fd33a10283c56fc"
 [[package]]
 name = "libgit2-sys"
 version = "0.18.3+1.9.2"
-source = "git+https://github.com/chalharu/git2-rs.git#082533588a49a48f84160e31933662743c4f637a"
+source = "git+https://github.com/chalharu/git2-rs.git#094a7975f387d287352b4f3c6fe4d88780958375"
 dependencies = [
  "cc",
  "libc",
@@ -2095,6 +2095,6 @@ checksum = "40990edd51aae2c2b6907af74ffb635029d5788228222c4bb811e9351c0caad3"
 
 [[package]]
 name = "zmij"
-version = "1.0.15"
+version = "1.0.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "94f63c051f4fe3c1509da62131a678643c5b6fbdc9273b2b79d4378ebda003d2"
+checksum = "dfcd145825aace48cff44a8844de64bf75feec3080e0aa5cdbde72961ae51a65"
