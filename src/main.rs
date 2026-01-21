@@ -735,7 +735,7 @@ impl PktLineIO {
         const LARGE_PACKET_MAX: usize = 65520;
         let mut offset = 0;
         while offset < data.len() {
-            let chunk_size = std::cmp::min(LARGE_PACKET_MAX, data.len() - offset);
+            let chunk_size = std::cmp::min(LARGE_PACKET_MAX - 4, data.len() - offset);
             self.write_pkt_line(&data[offset..offset + chunk_size])?;
             offset += chunk_size;
         }
