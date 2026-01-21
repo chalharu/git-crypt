@@ -259,3 +259,13 @@ if ! "$GIT_CRYPT" pre-commit; then
 fi
 echo "PASS: pre-commit hook"
 echo ""
+
+# テスト9: pre-auto-gcフック
+echo "=== Test 9: pre-auto-gc hook ==="
+# pre-auto-gcフックを実行してエラーが出ないことを確認
+if ! "$GIT_CRYPT" pre-auto-gc; then
+  echo "FAIL: pre-auto-gc hook returned non-zero" >&2
+  exit 1
+fi
+echo "PASS: pre-auto-gc hook"
+echo ""
