@@ -192,8 +192,6 @@ enum Error {
     InvalidVersion,
     #[error("Pathname is missing in the command")]
     PathnameIsMissing,
-    #[error("Invalid pathname: {0:?}")]
-    InvalidPathname(Vec<u8>),
     #[error("Invalid packet length")]
     InvalidPacketLength,
     #[error("Invalid packet UTF-8: {0}")]
@@ -986,12 +984,14 @@ impl PktLineProcess {
 
     fn command_clean(&mut self) -> Result<(), Error> {
         let mut pathname = None;
-        const PATHNAME_PREFIX: &[u8] = b"pathname=";
-        while let Some(payload) = self.pkt_io.read_pkt_line()?.without_eof()? {
+        const PATHNAME_PREFIX: &str = "pathname=";
+        while let Some(payload) =
+            PktLineTextResult::try_from(self.pkt_io.read_pkt_line()?)?.without_eof()?
+        {
             if payload.starts_with(PATHNAME_PREFIX) {
-                pathname = Some(payload.split_at(PATHNAME_PREFIX.len()).1.to_vec());
+                pathname = Some(payload.split_at(PATHNAME_PREFIX.len()).1.to_string());
             } else {
-                log::warn!("Unknown command: {}", String::from_utf8_lossy(&payload));
+                log::warn!("Unknown command arguments: {}", payload);
             }
         }
 
@@ -1000,9 +1000,7 @@ impl PktLineProcess {
         };
 
         let data = self.pkt_io.read_pkt_content()?;
-        let pathstring = String::from_utf8(pathname.clone())
-            .map_err(|_| self.write_error_response(Error::InvalidPathname(pathname)))?;
-        let path = Path::new(pathstring.as_str());
+        let path = Path::new(pathname.as_str());
 
         let encrypted = encrypt(&self.keypair, &mut self.config, &data, path, &mut self.repo)
             .map_err(|e| self.write_error_response(e))?;
@@ -1054,7 +1052,7 @@ impl PktLineProcess {
                 }
                 _ => {
                     log::warn!("Unknown command: {}", payload);
-                    self.pkt_io.write_pkt_line(b"status=error")?;
+                    self.pkt_io.write_pkt_string("status=error")?;
                     self.pkt_io.write_flush_pkt()?;
                 }
             }
