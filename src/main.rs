@@ -2,7 +2,7 @@ use std::{
     collections::{HashMap, HashSet},
     env::current_dir,
     fs,
-    io::{Read, Write as _},
+    io::{Read as _, Write as _},
     path::{Path, PathBuf},
 };
 
@@ -649,7 +649,9 @@ fn merge(
     base_obj.content(&base_data);
     base_obj.path(base.to_string_lossy().as_ref());
 
-    let local_data = fs::read(local)?;
+    let mut local_file = fs::OpenOptions::new().write(true).read(true).open(local)?;
+    let mut local_data = Vec::new();
+    local_file.read_to_end(&mut local_data)?;
     let local_data = decrypt(&keypair, &local_data, &mut repo, local, &mut config)?;
     let mut local_obj = MergeFileInput::new();
     local_obj.content(&local_data);
@@ -670,8 +672,17 @@ fn merge(
     }
 
     let result = git2::merge_file(&base_obj, &local_obj, &remote_obj, Some(&mut file_opts))?;
-    let encrypted = encrypt(&keypair, &mut config, result.content(), local, &mut repo)?;
-    fs::write(file_path, &encrypted)?;
+    let encrypted = encrypt(
+        &keypair,
+        &mut config,
+        result.content(),
+        file_path,
+        &mut repo,
+    )?;
+
+    local_file.set_len(0)?; // ファイルを空にする
+    local_file.write_all(&encrypted)?;
+    local_file.flush()?;
 
     Ok(())
 }

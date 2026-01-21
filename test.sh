@@ -106,7 +106,7 @@ cat "$TMPDIR/base.txt" | "$GIT_CRYPT" clean "$TEST_PATH" > "$TMPDIR/base.enc"
 cat "$TMPDIR/local.txt" | "$GIT_CRYPT" clean "$TEST_PATH" > "$TMPDIR/local.enc"
 cat "$TMPDIR/remote.txt" | "$GIT_CRYPT" clean "$TEST_PATH" > "$TMPDIR/remote.enc"
 
-"$GIT_CRYPT" merge "$TMPDIR/base.enc" "$TMPDIR/local.enc" "$TMPDIR/remote.enc" 0 "$TMPDIR/merged.enc"
+"$GIT_CRYPT" merge "$TMPDIR/base.enc" "$TMPDIR/local.enc" "$TMPDIR/remote.enc" 0 "$TEST_PATH"
 RET=$?
 echo "Exit code: $RET"
 if [ $RET -ne 0 ]; then
@@ -119,7 +119,7 @@ if ! grep -E '^-----BEGIN PGP MESSAGE-----' "$TMPDIR/local.enc" > /dev/null; the
   exit 1
 fi
 
-cat "$TMPDIR/merged.enc" | "$GIT_CRYPT" smudge "$TMPDIR/merged.enc" > "$TMPDIR/merged_output"
+cat "$TMPDIR/local.enc" | "$GIT_CRYPT" smudge "$TEST_PATH" > "$TMPDIR/merged_output"
 
 if ! grep -F 'line2 modified' "$TMPDIR/merged_output" > /dev/null; then
   echo "FAIL: merge output missing local change" >&2
