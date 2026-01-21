@@ -953,7 +953,8 @@ impl PktLineProcess {
     }
 
     fn command(&mut self) -> Result<(), Error> {
-        while let Some(payload) = self.pkt_io.read_pkt_line()?.without_eof()? {
+        // Flush or EOFで終了するまでコマンドを処理
+        while let PktLineReadResult::Packet(payload) = self.pkt_io.read_pkt_line()? {
             match payload.as_slice() {
                 b"command=clean" => {
                     let _ = self.command_clean();
