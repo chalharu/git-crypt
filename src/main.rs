@@ -275,26 +275,48 @@ struct GitConfig {
     private_key: String,
     encryption_path_regex: Option<String>,
     encryption_key_id: Option<String>,
-
-    // flyweight pattern
-    encryption_path_regex_instance: Option<Regex>,
-    encryption_key_id_vec: Option<Vec<u8>>,
 }
 
-impl GitConfig {
+struct EncryptionPolicy<'a> {
+    config: &'a GitConfig,
+    regex_cache: Option<Regex>,
+    key_id_cache: Option<Vec<u8>>,
+}
+
+impl<'a> EncryptionPolicy<'a> {
+    fn new(config: &'a GitConfig) -> Self {
+        EncryptionPolicy {
+            config,
+            regex_cache: None,
+            key_id_cache: None,
+        }
+    }
+
     fn should_encrypt_file_path(&mut self, path: &[u8]) -> Result<bool, Error> {
-        if self.encryption_path_regex_instance.is_none() {
-            if let Some(ref regex_str) = self.encryption_path_regex {
+        if self.regex_cache.is_none() {
+            if let Some(ref regex_str) = self.config.encryption_path_regex {
                 let compiled_regex = Regex::new(regex_str)?;
-                self.encryption_path_regex_instance = Some(compiled_regex);
+                self.regex_cache = Some(compiled_regex);
             } else {
                 // 正規表現が設定されていない場合は常にtrueを返す = すべてのファイルを暗号化対象とする
                 return Ok(true);
             }
         }
         // ここまで来たら正規表現が存在するのでunwrapして使用
-        let regex = self.encryption_path_regex_instance.as_ref().unwrap();
+        let regex = self.regex_cache.as_ref().unwrap();
         Ok(regex.is_match(path))
+    }
+
+    fn configured_key_id_bytes(&mut self) -> Result<Option<&[u8]>, Error> {
+        if self.key_id_cache.is_none() {
+            if let Some(ref encryption_key_id) = self.config.encryption_key_id {
+                self.key_id_cache = Some(hex::decode(encryption_key_id)?);
+            } else {
+                // encryption_key_idが設定されていない場合はNoneを返す
+                return Ok(None);
+            }
+        }
+        Ok(self.key_id_cache.as_deref())
     }
 
     fn is_encrypted_for_configured_key(&mut self, message: &Message) -> Result<bool, Error> {
@@ -316,19 +338,6 @@ impl GitConfig {
         }
         Ok(false)
     }
-
-    fn configured_key_id_bytes(&mut self) -> Result<Option<&[u8]>, Error> {
-        if self.encryption_key_id_vec.is_none() {
-            if let Some(ref encryption_key_id) = self.encryption_key_id {
-                let encryption_key_id_vec = hex::decode(encryption_key_id)?;
-                self.encryption_key_id_vec = Some(encryption_key_id_vec);
-            } else {
-                // encryption_key_idが設定されていない場合はNoneを返す
-                return Ok(None);
-            }
-        }
-        Ok(self.encryption_key_id_vec.as_deref())
-    }
 }
 
 // gitの設定を読み込む関数
@@ -345,8 +354,6 @@ fn load_git_config(repo: &GitRepository) -> Result<GitConfig, Error> {
         private_key,
         encryption_path_regex,
         encryption_key_id,
-        encryption_path_regex_instance: None,
-        encryption_key_id_vec: None,
     })
 }
 
@@ -399,12 +406,13 @@ fn smudge(path: &OsStr) -> Result<(), Error> {
 
 fn encrypt<'a, T: 'a + ToPath<'a>>(
     key_pair: &KeyPair,
-    config: &mut GitConfig,
+    config: &GitConfig,
     data: &[u8],
     path: T,
     repo: &mut GitRepository,
 ) -> Result<Vec<u8>, Error> {
-    if !config.should_encrypt_file_path(path.as_bytes())? {
+    let mut encryption_policy = EncryptionPolicy::new(config);
+    if !encryption_policy.should_encrypt_file_path(path.as_bytes())? {
         // 暗号化対象外のファイルの場合はそのまま出力
         return Ok(data.to_vec());
     }
@@ -424,7 +432,7 @@ fn encrypt<'a, T: 'a + ToPath<'a>>(
     };
 
     if let Ok((message, _)) = Message::from_armor(data)
-        && config.is_encrypted_for_configured_key(&message)?
+        && encryption_policy.is_encrypted_for_configured_key(&message)?
     {
         // すでに指定されたキーIDに一致する公開鍵で暗号化されている場合、そのまま出力
         return Ok(data.to_vec());
@@ -461,7 +469,7 @@ fn encrypt<'a, T: 'a + ToPath<'a>>(
     }
 
     // ファイルを暗号化して出力
-    let encryption_subkey = if let Some(key_id) = config.configured_key_id_bytes()? {
+    let encryption_subkey = if let Some(key_id) = encryption_policy.configured_key_id_bytes()? {
         // 指定されたキーIDに一致するサブキーを探す
         key_pair.public_key.public_subkeys.iter().find(|subkey| {
             subkey.is_encryption_key()
@@ -512,14 +520,18 @@ fn decrypt(
     data: &[u8],
     repo: &mut GitRepository,
     path: &[u8],
-    config: &mut GitConfig,
+    config: &GitConfig,
 ) -> Result<Vec<u8>, Error> {
+    let mut encryption_policy = EncryptionPolicy::new(config);
     let message = match Message::from_armor(data) {
         Ok((msg, _)) => msg,
         Err(e) => {
             // パケットが不正 = 暗号化されていない場合はそのまま出力
             // 本来は平文と破損を区別したいが、現状では区別できないためそのまま出力
-            if config.should_encrypt_file_path(path).unwrap_or(false) {
+            if encryption_policy
+                .should_encrypt_file_path(path)
+                .unwrap_or(false)
+            {
                 log::error!("Not a valid PGP message ({:?}), outputting raw data", e);
             }
             return Ok(data.to_vec());
@@ -529,7 +541,7 @@ fn decrypt(
         // 暗号化されていない場合はそのまま出力
         return Ok(data.to_vec());
     }
-    if !config.is_encrypted_for_configured_key(&message)? {
+    if !encryption_policy.is_encrypted_for_configured_key(&message)? {
         // 指定されたキーIDに一致する公開鍵で暗号化されていない場合はそのまま出力
         return Ok(data.to_vec());
     }
@@ -604,7 +616,8 @@ fn textconv(path: &Path) -> Result<(), Error> {
 
 fn pre_commit() -> Result<(), Error> {
     let repo = GitRepository::new()?;
-    let mut config = load_git_config(&repo)?;
+    let config = load_git_config(&repo)?;
+    let mut encryption_policy = EncryptionPolicy::new(&config);
 
     let diff = repo.repo.diff_tree_to_index(
         repo.repo
@@ -630,13 +643,14 @@ fn pre_commit() -> Result<(), Error> {
     }) {
         let oid = d.new_file().id();
         if let Some(file_path) = d.new_file().path()
-            && config.should_encrypt_file_path(file_path.as_os_str().as_encoded_bytes())?
+            && encryption_policy
+                .should_encrypt_file_path(file_path.as_os_str().as_encoded_bytes())?
         {
             let blob = repo.repo.find_blob(oid)?;
             let data = blob.content();
 
             if let Ok((message, _)) = Message::from_armor(data)
-                && config.is_encrypted_for_configured_key(&message)?
+                && encryption_policy.is_encrypted_for_configured_key(&message)?
             {
                 continue; // 暗号化されているので次へ
             }
