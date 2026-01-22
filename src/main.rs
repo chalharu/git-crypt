@@ -282,7 +282,7 @@ struct GitConfig {
 }
 
 impl GitConfig {
-    fn is_encryption(&mut self, path: &[u8]) -> Result<bool, Error> {
+    fn should_encrypt_file_path(&mut self, path: &[u8]) -> Result<bool, Error> {
         if self.encryption_path_regex_instance.is_none() {
             if let Some(ref regex_str) = self.encryption_path_regex {
                 let compiled_regex = Regex::new(regex_str)?;
@@ -297,7 +297,7 @@ impl GitConfig {
         Ok(regex.is_match(path))
     }
 
-    fn is_encrypted_by_key(&mut self, message: &Message) -> Result<bool, Error> {
+    fn is_encrypted_for_configured_key(&mut self, message: &Message) -> Result<bool, Error> {
         if let Some(key_id) = self.encryption_key_id()? {
             if let Message::Encrypted { esk, .. } = message {
                 for e in esk.iter() {
@@ -404,7 +404,7 @@ fn encrypt<'a, T: 'a + ToPath<'a>>(
     path: T,
     repo: &mut GitRepository,
 ) -> Result<Vec<u8>, Error> {
-    if !config.is_encryption(path.as_bytes())? {
+    if !config.should_encrypt_file_path(path.as_bytes())? {
         // 暗号化対象外のファイルの場合はそのまま出力
         return Ok(data.to_vec());
     }
@@ -424,7 +424,7 @@ fn encrypt<'a, T: 'a + ToPath<'a>>(
     };
 
     if let Ok((message, _)) = Message::from_armor(data)
-        && config.is_encrypted_by_key(&message)?
+        && config.is_encrypted_for_configured_key(&message)?
     {
         // すでに指定されたキーIDに一致する公開鍵で暗号化されている場合、そのまま出力
         return Ok(data.to_vec());
@@ -519,7 +519,7 @@ fn decrypt(
         Err(e) => {
             // パケットが不正 = 暗号化されていない場合はそのまま出力
             // 本来は平文と破損を区別したいが、現状では区別できないためそのまま出力
-            if config.is_encryption(path).unwrap_or(false) {
+            if config.should_encrypt_file_path(path).unwrap_or(false) {
                 log::error!("Not a valid PGP message ({:?}), outputting raw data", e);
             }
             return Ok(data.to_vec());
@@ -529,7 +529,7 @@ fn decrypt(
         // 暗号化されていない場合はそのまま出力
         return Ok(data.to_vec());
     }
-    if !config.is_encrypted_by_key(&message)? {
+    if !config.is_encrypted_for_configured_key(&message)? {
         // 指定されたキーIDに一致する公開鍵で暗号化されていない場合はそのまま出力
         return Ok(data.to_vec());
     }
@@ -630,13 +630,13 @@ fn pre_commit() -> Result<(), Error> {
     }) {
         let oid = d.new_file().id();
         if let Some(file_path) = d.new_file().path()
-            && config.is_encryption(file_path.as_os_str().as_encoded_bytes())?
+            && config.should_encrypt_file_path(file_path.as_os_str().as_encoded_bytes())?
         {
             let blob = repo.repo.find_blob(oid)?;
             let data = blob.content();
 
             if let Ok((message, _)) = Message::from_armor(data)
-                && config.is_encrypted_by_key(&message)?
+                && config.is_encrypted_for_configured_key(&message)?
             {
                 continue; // 暗号化されているので次へ
             }
