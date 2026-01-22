@@ -298,7 +298,7 @@ impl GitConfig {
     }
 
     fn is_encrypted_for_configured_key(&mut self, message: &Message) -> Result<bool, Error> {
-        if let Some(key_id) = self.encryption_key_id()? {
+        if let Some(key_id) = self.configured_key_id_bytes()? {
             if let Message::Encrypted { esk, .. } = message {
                 for e in esk.iter() {
                     if let Esk::PublicKeyEncryptedSessionKey(pubkey) = e
@@ -317,7 +317,7 @@ impl GitConfig {
         Ok(false)
     }
 
-    fn encryption_key_id(&mut self) -> Result<Option<&[u8]>, Error> {
+    fn configured_key_id_bytes(&mut self) -> Result<Option<&[u8]>, Error> {
         if self.encryption_key_id_vec.is_none() {
             if let Some(ref encryption_key_id) = self.encryption_key_id {
                 let encryption_key_id_vec = hex::decode(encryption_key_id)?;
@@ -461,7 +461,7 @@ fn encrypt<'a, T: 'a + ToPath<'a>>(
     }
 
     // ファイルを暗号化して出力
-    let encryption_subkey = if let Some(key_id) = config.encryption_key_id()? {
+    let encryption_subkey = if let Some(key_id) = config.configured_key_id_bytes()? {
         // 指定されたキーIDに一致するサブキーを探す
         key_pair.public_key.public_subkeys.iter().find(|subkey| {
             subkey.is_encryption_key()
