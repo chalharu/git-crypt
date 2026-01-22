@@ -1148,11 +1148,11 @@ impl PktLineProcess {
             match payload.as_str() {
                 "command=clean" => {
                     log::debug!("Processing clean command");
-                    self.command_clean().or_else(Error::into_io_error)?;
+                    self.command_clean()?;
                 }
                 "command=smudge" => {
                     log::debug!("Processing smudge command");
-                    self.command_smudge().or_else(Error::into_io_error)?;
+                    self.command_smudge()?;
                 }
                 _ => {
                     log::warn!("Unknown command: {}", payload);
