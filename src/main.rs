@@ -1,6 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     env::current_dir,
+    ffi::OsStr,
     fs,
     io::{
         self, BufReader, BufWriter, ErrorKind, Read as _, Seek, StdinLock, StdoutLock, Write as _,
@@ -81,7 +82,6 @@ fn main() {
     let cli = Cli::parse();
 
     if cli.debug {
-        // TODO: Implement debug trace output
         stderrlog::new()
             .module(module_path!())
             .verbosity(3)
@@ -196,6 +196,16 @@ enum Error {
     InvalidPacketLength,
     #[error("Invalid packet UTF-8: {0}")]
     InvalidPacketUtf8(#[from] std::string::FromUtf8Error),
+}
+
+impl Error {
+    // IOエラーに変換する。IOエラーでない場合はOk(())を返す。
+    fn into_io_error(self) -> Result<(), std::io::Error> {
+        match self {
+            Error::Io(e) => Err(e),
+            _ => Ok(()),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -979,21 +989,29 @@ impl PktLineProcess {
     }
 
     fn write_error_response(&mut self, e: Error) -> Error {
-        let _ = self.pkt_io.write_pkt_string("status=error");
-        let _ = self.pkt_io.write_flush_pkt();
+        log::error!("Error occurred: {:?}", e);
+        if let Err(e) = self.pkt_io.write_pkt_string("status=error") {
+            log::error!("Failed to write error response: {:?}", e);
+            return e;
+        }
+        if let Err(e) = self.pkt_io.write_flush_pkt() {
+            log::error!("Failed to write flush pkt: {:?}", e);
+            return e;
+        }
         e
     }
 
     fn command_clean(&mut self) -> Result<(), Error> {
         let mut pathname = None;
-        const PATHNAME_PREFIX: &str = "pathname=";
-        while let Some(payload) =
-            PktLineTextResult::try_from(self.pkt_io.read_pkt_line()?)?.without_eof()?
-        {
+        const PATHNAME_PREFIX: &[u8] = b"pathname=";
+        while let Some(payload) = self.pkt_io.read_pkt_line()?.without_eof()? {
             if payload.starts_with(PATHNAME_PREFIX) {
-                pathname = Some(payload.split_at(PATHNAME_PREFIX.len()).1.to_string());
+                pathname = Some(payload.split_at(PATHNAME_PREFIX.len()).1.to_vec());
             } else {
-                log::warn!("Unknown command arguments: {}", payload);
+                log::warn!(
+                    "Unknown command arguments: {}",
+                    String::from_utf8_lossy(&payload)
+                );
             }
         }
 
@@ -1002,7 +1020,7 @@ impl PktLineProcess {
         };
 
         let data = self.pkt_io.read_pkt_content()?;
-        let path = Path::new(pathname.as_str());
+        let path = Path::new(unsafe { OsStr::from_encoded_bytes_unchecked(&pathname) });
 
         let encrypted = encrypt(&self.keypair, &mut self.config, &data, path, &mut self.repo)
             .map_err(|e| self.write_error_response(e))?;
@@ -1013,14 +1031,15 @@ impl PktLineProcess {
 
     fn command_smudge(&mut self) -> Result<(), Error> {
         let mut pathname = None;
-        const PATHNAME_PREFIX: &str = "pathname=";
-        while let Some(payload) =
-            PktLineTextResult::try_from(self.pkt_io.read_pkt_line()?)?.without_eof()?
-        {
+        const PATHNAME_PREFIX: &[u8] = b"pathname=";
+        while let Some(payload) = self.pkt_io.read_pkt_line()?.without_eof()? {
             if payload.starts_with(PATHNAME_PREFIX) {
-                pathname = Some(payload.split_at(PATHNAME_PREFIX.len()).1.to_string());
+                pathname = Some(payload.split_at(PATHNAME_PREFIX.len()).1.to_vec());
             } else {
-                log::warn!("Unknown command arguments: {}", payload);
+                log::warn!(
+                    "Unknown command arguments: {}",
+                    String::from_utf8_lossy(&payload)
+                );
             }
         }
 
@@ -1029,7 +1048,7 @@ impl PktLineProcess {
         };
 
         let data = self.pkt_io.read_pkt_content()?;
-        let path = Path::new(pathname.as_str());
+        let path = Path::new(unsafe { OsStr::from_encoded_bytes_unchecked(&pathname) });
 
         let decrypted = decrypt(&self.keypair, &data, &mut self.repo, path, &mut self.config)
             .map_err(|e| self.write_error_response(e))?;
@@ -1039,18 +1058,21 @@ impl PktLineProcess {
     }
 
     fn command(&mut self) -> Result<(), Error> {
-        // Flush or EOFで終了するまでコマンドを処理
-        while let PktLineTextResult::Packet(payload) =
-            PktLineTextResult::try_from(self.pkt_io.read_pkt_line()?)?
+        // EOFで終了するまでコマンドを処理
+        while let Ok(payload) =
+            PktLineTextResult::try_from(self.pkt_io.read_pkt_line()?)?.without_eof()
         {
+            let Some(payload) = payload else {
+                continue;
+            };
             match payload.as_str() {
                 "command=clean" => {
                     log::debug!("Processing clean command");
-                    let _ = self.command_clean();
+                    self.command_clean().or_else(Error::into_io_error)?;
                 }
                 "command=smudge" => {
                     log::debug!("Processing smudge command");
-                    let _ = self.command_smudge();
+                    self.command_smudge().or_else(Error::into_io_error)?;
                 }
                 _ => {
                     log::warn!("Unknown command: {}", payload);
