@@ -377,7 +377,8 @@ fn clean(path: &OsStr) -> Result<(), Error> {
     let mut data = Vec::new();
     std::io::stdin().lock().read_to_end(&mut data)?;
 
-    let encrypted = encrypt(&keypair, &config, &data, path, &mut repo)?;
+    let mut encryption_policy = EncryptionPolicy::new(&config);
+    let encrypted = encrypt(&keypair, &data, path, &mut repo, &mut encryption_policy)?;
     std::io::stdout().write_all(&encrypted)?;
 
     Ok(())
@@ -389,10 +390,18 @@ fn smudge(path: &OsStr) -> Result<(), Error> {
     let config = GitConfig::load(&repo)?;
     let keypair = KeyPair::try_from(&config)?;
 
+    let mut encryption_policy = EncryptionPolicy::new(&config);
+
     let mut data = Vec::new();
     std::io::stdin().lock().read_to_end(&mut data)?;
 
-    let decrypted = decrypt(&keypair, &data, &mut repo, path.as_encoded_bytes(), &config)?;
+    let decrypted = decrypt(
+        &keypair,
+        &data,
+        &mut repo,
+        path.as_encoded_bytes(),
+        &mut encryption_policy,
+    )?;
     std::io::stdout().write_all(&decrypted)?;
 
     Ok(())
@@ -400,12 +409,11 @@ fn smudge(path: &OsStr) -> Result<(), Error> {
 
 fn encrypt<'a, T: 'a + ToPath<'a>>(
     key_pair: &KeyPair,
-    config: &GitConfig,
     data: &[u8],
     path: T,
     repo: &mut GitRepository,
+    encryption_policy: &mut EncryptionPolicy<'_>,
 ) -> Result<Vec<u8>, Error> {
-    let mut encryption_policy = EncryptionPolicy::new(config);
     if !encryption_policy.should_encrypt_file_path(path.as_bytes())? {
         // 暗号化対象外のファイルの場合はそのまま出力
         return Ok(data.to_vec());
@@ -514,9 +522,8 @@ fn decrypt(
     data: &[u8],
     repo: &mut GitRepository,
     path: &[u8],
-    config: &GitConfig,
+    encryption_policy: &mut EncryptionPolicy,
 ) -> Result<Vec<u8>, Error> {
-    let mut encryption_policy = EncryptionPolicy::new(config);
     let message = match Message::from_armor(data) {
         Ok((msg, _)) => msg,
         Err(e) => {
@@ -594,6 +601,8 @@ fn textconv(path: &Path) -> Result<(), Error> {
     let config = GitConfig::load(&repo)?;
     let keypair = KeyPair::try_from(&config)?;
 
+    let mut encryption_policy = EncryptionPolicy::new(&config);
+
     let data = fs::read(path)?;
 
     let decrypted = decrypt(
@@ -601,7 +610,7 @@ fn textconv(path: &Path) -> Result<(), Error> {
         &data,
         &mut repo,
         path.as_os_str().as_encoded_bytes(),
-        &config,
+        &mut encryption_policy,
     )?;
     std::io::stdout().write_all(&decrypted)?;
 
@@ -735,6 +744,7 @@ fn merge(
     let mut repo = GitRepository::new()?;
     let config = GitConfig::load(&repo)?;
     let keypair = KeyPair::try_from(&config)?;
+    let mut encryption_policy = EncryptionPolicy::new(&config);
 
     let base_data = fs::read(base)?;
     let base_data = decrypt(
@@ -742,7 +752,7 @@ fn merge(
         &base_data,
         &mut repo,
         base.as_os_str().as_encoded_bytes(),
-        &config,
+        &mut encryption_policy,
     )?;
     let mut base_obj = MergeFileInput::new();
     base_obj.content(&base_data);
@@ -756,7 +766,7 @@ fn merge(
         &local_data,
         &mut repo,
         local.as_os_str().as_encoded_bytes(),
-        &config,
+        &mut encryption_policy,
     )?;
     let mut local_obj = MergeFileInput::new();
     local_obj.content(&local_data);
@@ -768,7 +778,7 @@ fn merge(
         &remote_data,
         &mut repo,
         remote.as_os_str().as_encoded_bytes(),
-        &config,
+        &mut encryption_policy,
     )?;
     let mut remote_obj = MergeFileInput::new();
     remote_obj.content(&remote_data);
@@ -781,7 +791,13 @@ fn merge(
     }
 
     let result = git2::merge_file(&base_obj, &local_obj, &remote_obj, Some(&mut file_opts))?;
-    let encrypted = encrypt(&keypair, &config, result.content(), file_path, &mut repo)?;
+    let encrypted = encrypt(
+        &keypair,
+        result.content(),
+        file_path,
+        &mut repo,
+        &mut encryption_policy,
+    )?;
 
     local_file.seek(io::SeekFrom::Start(0))?; // ファイルポインタを先頭に戻す
     local_file.set_len(0)?; // ファイルを空にする
@@ -967,7 +983,6 @@ impl PktLineIO {
 struct PktLineProcess {
     pkt_io: PktLineIO,
     repo: GitRepository,
-    config: GitConfig,
     keypair: KeyPair,
 }
 
@@ -980,7 +995,6 @@ impl PktLineProcess {
         Ok(PktLineProcess {
             pkt_io: PktLineIO::new(),
             repo,
-            config,
             keypair,
         })
     }
@@ -1053,7 +1067,7 @@ impl PktLineProcess {
         Ok(())
     }
 
-    fn command_clean(&mut self) -> Result<(), Error> {
+    fn command_clean(&mut self, encryption_policy: &mut EncryptionPolicy) -> Result<(), Error> {
         let mut pathname = None;
         const PATHNAME_PREFIX: &[u8] = b"pathname=";
         while let Some(payload) = self.pkt_io.read_pkt_line()?.without_eof()? {
@@ -1076,10 +1090,10 @@ impl PktLineProcess {
 
         let encrypted = match encrypt(
             &self.keypair,
-            &self.config,
             &data,
             pathname.as_slice(),
             &mut self.repo,
+            encryption_policy,
         ) {
             Ok(enc) => enc,
             Err(e) => {
@@ -1091,7 +1105,7 @@ impl PktLineProcess {
         Ok(())
     }
 
-    fn command_smudge(&mut self) -> Result<(), Error> {
+    fn command_smudge(&mut self, encryption_policy: &mut EncryptionPolicy) -> Result<(), Error> {
         let mut pathname = None;
         const PATHNAME_PREFIX: &[u8] = b"pathname=";
         while let Some(payload) = self.pkt_io.read_pkt_line()?.without_eof()? {
@@ -1117,7 +1131,7 @@ impl PktLineProcess {
             &data,
             &mut self.repo,
             &pathname,
-            &self.config,
+            encryption_policy,
         ) {
             Ok(dec) => dec,
             Err(e) => {
@@ -1129,7 +1143,7 @@ impl PktLineProcess {
         Ok(())
     }
 
-    fn command(&mut self) -> Result<(), Error> {
+    fn command(&mut self, encryption_policy: &mut EncryptionPolicy) -> Result<(), Error> {
         // EOFで終了するまでコマンドを処理
         while let Ok(payload) =
             PktLineTextResult::try_from(self.pkt_io.read_pkt_line()?)?.without_eof()
@@ -1140,11 +1154,11 @@ impl PktLineProcess {
             match payload.as_str() {
                 "command=clean" => {
                     log::debug!("Processing clean command");
-                    self.command_clean()?;
+                    self.command_clean(encryption_policy)?;
                 }
                 "command=smudge" => {
                     log::debug!("Processing smudge command");
-                    self.command_smudge()?;
+                    self.command_smudge(encryption_policy)?;
                 }
                 _ => {
                     log::warn!("Unknown command: {}", payload);
@@ -1157,8 +1171,10 @@ impl PktLineProcess {
     }
 
     fn process(&mut self) -> Result<(), Error> {
+        let config = GitConfig::load(&self.repo)?;
+        let mut encryption_policy = EncryptionPolicy::new(&config);
         self.handshake()?;
-        self.command()?;
+        self.command(&mut encryption_policy)?;
         Ok(())
     }
 }
