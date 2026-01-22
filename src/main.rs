@@ -115,21 +115,27 @@ fn main() {
     let cli = Cli::parse();
 
     if cli.debug {
-        stderrlog::new()
+        if let Err(e) = stderrlog::new()
             .module(module_path!())
             .verbosity(3)
             .timestamp(stderrlog::Timestamp::Second)
             .init()
-            .unwrap();
+        {
+            eprintln!("Failed to initialize logging: {}", e);
+            std::process::exit(1);
+        }
         log::debug!("Debug mode is enabled");
     } else {
-        stderrlog::new()
+        if let Err(e) = stderrlog::new()
             .module(module_path!())
             .verbosity(0)
             .timestamp(stderrlog::Timestamp::Off)
             .show_level(false)
             .init()
-            .unwrap();
+        {
+            eprintln!("Failed to initialize logging: {}", e);
+            std::process::exit(1);
+        }
     }
 
     match cli.command {
@@ -491,9 +497,7 @@ fn encrypt<'a, T: 'a + ToPath<'a>>(
     let mut builder = MessageBuilder::from_bytes("", data.to_vec())
         .seipd_v1(rand::thread_rng(), SymmetricKeyAlgorithm::AES256);
     builder.compression(CompressionAlgorithm::ZLIB);
-    builder
-        .encrypt_to_key(rand::thread_rng(), &encryption_subkey)
-        .unwrap();
+    builder.encrypt_to_key(rand::thread_rng(), &encryption_subkey)?;
 
     let encrypted = builder.to_armored_string(rand::thread_rng(), ArmorOptions::default())?;
 
