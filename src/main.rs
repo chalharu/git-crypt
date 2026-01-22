@@ -229,16 +229,6 @@ enum Error {
     InvalidPacketUtf8(#[from] std::string::FromUtf8Error),
 }
 
-impl Error {
-    // IOエラーに変換する。IOエラーでない場合はOk(())を返す。
-    fn into_io_error(self) -> Result<(), std::io::Error> {
-        match self {
-            Error::Io(e) => Err(e),
-            _ => Ok(()),
-        }
-    }
-}
-
 #[derive(Debug)]
 struct KeyPair {
     public_key: SignedPublicKey,
