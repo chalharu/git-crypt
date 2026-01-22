@@ -1,7 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     env::current_dir,
-    ffi::OsString,
+    ffi::{OsStr, OsString},
     fs,
     io::{
         self, BufReader, BufWriter, ErrorKind, Read as _, Seek, StdinLock, StdoutLock, Write as _,
@@ -78,6 +78,35 @@ pub enum Commands {
     Process,
 }
 
+trait ToPath<'a> {
+    fn to_path(self) -> Option<&'a Path>;
+    fn as_bytes(&self) -> &'a [u8];
+}
+
+impl<'a> ToPath<'a> for &'a [u8] {
+    fn to_path(self) -> Option<&'a Path> {
+        let path = str::from_utf8(self);
+        match path {
+            Ok(s) => Some(Path::new(s)),
+            Err(_) => None,
+        }
+    }
+
+    fn as_bytes(&self) -> &'a [u8] {
+        self
+    }
+}
+
+impl<'a> ToPath<'a> for &'a OsStr {
+    fn to_path(self) -> Option<&'a Path> {
+        Some(Path::new(self))
+    }
+
+    fn as_bytes(&self) -> &'a [u8] {
+        self.as_encoded_bytes()
+    }
+}
+
 fn main() {
     let cli = Cli::parse();
 
@@ -101,7 +130,7 @@ fn main() {
 
     match cli.command {
         Commands::Clean { file_path } => {
-            if let Err(e) = clean(file_path.as_encoded_bytes()) {
+            if let Err(e) = clean(&file_path) {
                 log::error!("Error during clean: {}", e);
                 std::process::exit(1);
             }
@@ -124,13 +153,7 @@ fn main() {
             remote,
             marker_size,
             file_path,
-        } => match merge(
-            &base,
-            &local,
-            &remote,
-            marker_size.parse().ok(),
-            file_path.as_encoded_bytes(),
-        ) {
+        } => match merge(&base, &local, &remote, marker_size.parse().ok(), &file_path) {
             Ok(is_automergeable) => std::process::exit(if is_automergeable { 0 } else { 1 }),
             Err(e) => {
                 log::error!("Error during merge: {}", e);
@@ -338,7 +361,7 @@ impl GitRepository {
     }
 }
 
-fn clean(path: &[u8]) -> Result<(), Error> {
+fn clean(path: &OsStr) -> Result<(), Error> {
     let mut repo = GitRepository::new()?;
 
     let mut config = load_git_config(&repo)?;
@@ -368,14 +391,14 @@ fn smudge(path: &[u8]) -> Result<(), Error> {
     Ok(())
 }
 
-fn encrypt(
+fn encrypt<'a, T: 'a + ToPath<'a>>(
     key_pair: &KeyPair,
     config: &mut GitConfig,
     data: &[u8],
-    path: &[u8],
+    path: T,
     repo: &mut GitRepository,
 ) -> Result<Vec<u8>, Error> {
-    if !config.is_encryption(path)? {
+    if !config.is_encryption(path.as_bytes())? {
         // 暗号化対象外のファイルの場合はそのまま出力
         return Ok(data.to_vec());
     }
@@ -402,7 +425,7 @@ fn encrypt(
     }
 
     // インデックスの内容を取得して復号化を試みる
-    if let Ok(path) = str::from_utf8(path)
+    if let Some(path) = path.to_path()
         && let Some(index_entry) = repo.repo.index()?.get_path(Path::new(path), 0)
         && let Ok(blob) = repo.repo.find_blob(index_entry.id)
         && let Ok(message) = Message::from_bytes(blob.content())
@@ -695,7 +718,7 @@ fn merge(
     local: &Path,
     remote: &Path,
     marker_size: Option<usize>,
-    file_path: &[u8],
+    file_path: &OsStr,
 ) -> Result<bool, Error> {
     let mut repo = GitRepository::new()?;
     let mut config = load_git_config(&repo)?;
@@ -1048,7 +1071,7 @@ impl PktLineProcess {
             &self.keypair,
             &mut self.config,
             &data,
-            &pathname,
+            pathname.as_slice(),
             &mut self.repo,
         )
         .map_err(|e| self.write_error_response(e))?;
