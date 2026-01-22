@@ -277,6 +277,25 @@ struct GitConfig {
     encryption_key_id: Option<String>,
 }
 
+impl GitConfig {
+    // gitの設定を読み込む関数
+    fn load(repo: &GitRepository) -> Result<GitConfig, Error> {
+        let config = repo.repo.config()?;
+
+        let public_key = config.get_string("git-crypt.public-key")?;
+        let private_key = config.get_string("git-crypt.private-key")?;
+        let encryption_path_regex = config.get_string("git-crypt.encryption-path-regex").ok();
+        let encryption_key_id = config.get_string("git-crypt.encryption-key-id").ok();
+
+        Ok(GitConfig {
+            public_key,
+            private_key,
+            encryption_path_regex,
+            encryption_key_id,
+        })
+    }
+}
+
 struct EncryptionPolicy<'a> {
     config: &'a GitConfig,
     regex_cache: Option<Regex>,
@@ -340,23 +359,6 @@ impl<'a> EncryptionPolicy<'a> {
     }
 }
 
-// gitの設定を読み込む関数
-fn load_git_config(repo: &GitRepository) -> Result<GitConfig, Error> {
-    let config = repo.repo.config()?;
-
-    let public_key = config.get_string("git-crypt.public-key")?;
-    let private_key = config.get_string("git-crypt.private-key")?;
-    let encryption_path_regex = config.get_string("git-crypt.encryption-path-regex").ok();
-    let encryption_key_id = config.get_string("git-crypt.encryption-key-id").ok();
-
-    Ok(GitConfig {
-        public_key,
-        private_key,
-        encryption_path_regex,
-        encryption_key_id,
-    })
-}
-
 struct GitRepository {
     repo: git2::Repository,
 }
@@ -371,13 +373,13 @@ impl GitRepository {
 fn clean(path: &OsStr) -> Result<(), Error> {
     let mut repo = GitRepository::new()?;
 
-    let mut config = load_git_config(&repo)?;
+    let config = GitConfig::load(&repo)?;
     let keypair = KeyPair::try_from(&config)?;
 
     let mut data = Vec::new();
     std::io::stdin().lock().read_to_end(&mut data)?;
 
-    let encrypted = encrypt(&keypair, &mut config, &data, path, &mut repo)?;
+    let encrypted = encrypt(&keypair, &config, &data, path, &mut repo)?;
     std::io::stdout().write_all(&encrypted)?;
 
     Ok(())
@@ -386,19 +388,13 @@ fn clean(path: &OsStr) -> Result<(), Error> {
 fn smudge(path: &OsStr) -> Result<(), Error> {
     let mut repo = GitRepository::new()?;
 
-    let mut config = load_git_config(&repo)?;
+    let config = GitConfig::load(&repo)?;
     let keypair = KeyPair::try_from(&config)?;
 
     let mut data = Vec::new();
     std::io::stdin().lock().read_to_end(&mut data)?;
 
-    let decrypted = decrypt(
-        &keypair,
-        &data,
-        &mut repo,
-        path.as_encoded_bytes(),
-        &mut config,
-    )?;
+    let decrypted = decrypt(&keypair, &data, &mut repo, path.as_encoded_bytes(), &config)?;
     std::io::stdout().write_all(&decrypted)?;
 
     Ok(())
@@ -597,7 +593,7 @@ fn decrypt(
 fn textconv(path: &Path) -> Result<(), Error> {
     let mut repo = GitRepository::new()?;
 
-    let mut config = load_git_config(&repo)?;
+    let config = GitConfig::load(&repo)?;
     let keypair = KeyPair::try_from(&config)?;
 
     let data = fs::read(path)?;
@@ -607,7 +603,7 @@ fn textconv(path: &Path) -> Result<(), Error> {
         &data,
         &mut repo,
         path.as_os_str().as_encoded_bytes(),
-        &mut config,
+        &config,
     )?;
     std::io::stdout().write_all(&decrypted)?;
 
@@ -616,7 +612,7 @@ fn textconv(path: &Path) -> Result<(), Error> {
 
 fn pre_commit() -> Result<(), Error> {
     let repo = GitRepository::new()?;
-    let config = load_git_config(&repo)?;
+    let config = GitConfig::load(&repo)?;
     let mut encryption_policy = EncryptionPolicy::new(&config);
 
     let diff = repo.repo.diff_tree_to_index(
@@ -739,7 +735,7 @@ fn merge(
     file_path: &OsStr,
 ) -> Result<bool, Error> {
     let mut repo = GitRepository::new()?;
-    let mut config = load_git_config(&repo)?;
+    let config = GitConfig::load(&repo)?;
     let keypair = KeyPair::try_from(&config)?;
 
     let base_data = fs::read(base)?;
@@ -748,7 +744,7 @@ fn merge(
         &base_data,
         &mut repo,
         base.as_os_str().as_encoded_bytes(),
-        &mut config,
+        &config,
     )?;
     let mut base_obj = MergeFileInput::new();
     base_obj.content(&base_data);
@@ -762,7 +758,7 @@ fn merge(
         &local_data,
         &mut repo,
         local.as_os_str().as_encoded_bytes(),
-        &mut config,
+        &config,
     )?;
     let mut local_obj = MergeFileInput::new();
     local_obj.content(&local_data);
@@ -774,7 +770,7 @@ fn merge(
         &remote_data,
         &mut repo,
         remote.as_os_str().as_encoded_bytes(),
-        &mut config,
+        &config,
     )?;
     let mut remote_obj = MergeFileInput::new();
     remote_obj.content(&remote_data);
@@ -787,13 +783,7 @@ fn merge(
     }
 
     let result = git2::merge_file(&base_obj, &local_obj, &remote_obj, Some(&mut file_opts))?;
-    let encrypted = encrypt(
-        &keypair,
-        &mut config,
-        result.content(),
-        file_path,
-        &mut repo,
-    )?;
+    let encrypted = encrypt(&keypair, &config, result.content(), file_path, &mut repo)?;
 
     local_file.seek(io::SeekFrom::Start(0))?; // ファイルポインタを先頭に戻す
     local_file.set_len(0)?; // ファイルを空にする
@@ -986,7 +976,7 @@ struct PktLineProcess {
 impl PktLineProcess {
     fn new() -> Result<Self, Error> {
         let repo = GitRepository::new()?;
-        let config = load_git_config(&repo)?;
+        let config = GitConfig::load(&repo)?;
         let keypair = KeyPair::try_from(&config)?;
 
         Ok(PktLineProcess {
@@ -1088,7 +1078,7 @@ impl PktLineProcess {
 
         let encrypted = match encrypt(
             &self.keypair,
-            &mut self.config,
+            &self.config,
             &data,
             pathname.as_slice(),
             &mut self.repo,
@@ -1129,7 +1119,7 @@ impl PktLineProcess {
             &data,
             &mut self.repo,
             &pathname,
-            &mut self.config,
+            &self.config,
         ) {
             Ok(dec) => dec,
             Err(e) => {
