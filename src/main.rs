@@ -1,7 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     env::current_dir,
-    ffi::OsStr,
+    ffi::OsString,
     fs,
     io::{
         self, BufReader, BufWriter, ErrorKind, Read as _, Seek, StdinLock, StdoutLock, Write as _,
@@ -21,7 +21,7 @@ use pgp::{
     crypto::sym::SymmetricKeyAlgorithm,
     types::{CompressionAlgorithm, KeyDetails, PublicKeyTrait},
 };
-use regex::Regex;
+use regex::bytes::Regex;
 
 #[derive(Parser, Clone, Debug)]
 struct Cli {
@@ -38,37 +38,37 @@ pub enum Commands {
     Clean {
         /// ファイルパス
         #[arg(index = 1)]
-        file_path: String,
+        file_path: OsString,
     },
     /// git smudgeフィルタ用コマンド
     Smudge {
         /// ファイルパス
         #[arg(index = 1)]
-        file_path: String,
+        file_path: OsString,
     },
     /// git textconvフィルタ用コマンド
     Textconv {
         /// ファイルパス
         #[arg(index = 1)]
-        file_path: String,
+        file_path: PathBuf,
     },
     /// git mergeドライバ用コマンド
     Merge {
         /// ベースファイルパス
         #[arg(index = 1)]
-        base: String,
+        base: PathBuf,
         /// ローカルファイルパス
         #[arg(index = 2)]
-        local: String,
+        local: PathBuf,
         /// リモートファイルパス
         #[arg(index = 3)]
-        remote: String,
+        remote: PathBuf,
         /// マーカーサイズ
         #[arg(index = 4)]
         marker_size: String,
         /// ファイルパス
         #[arg(index = 5)]
-        file_path: String,
+        file_path: OsString,
     },
     /// git pre-commitフック用コマンド
     PreCommit,
@@ -101,19 +101,19 @@ fn main() {
 
     match cli.command {
         Commands::Clean { file_path } => {
-            if let Err(e) = clean(Path::new(&file_path)) {
+            if let Err(e) = clean(file_path.as_encoded_bytes()) {
                 log::error!("Error during clean: {}", e);
                 std::process::exit(1);
             }
         }
         Commands::Smudge { file_path } => {
-            if let Err(e) = smudge(Path::new(&file_path)) {
+            if let Err(e) = smudge(file_path.as_encoded_bytes()) {
                 log::error!("Error during smudge: {:?}", e);
                 std::process::exit(1);
             }
         }
         Commands::Textconv { file_path } => {
-            if let Err(e) = textconv(Path::new(&file_path)) {
+            if let Err(e) = textconv(&file_path) {
                 log::error!("Error during textconv: {}", e);
                 std::process::exit(1);
             }
@@ -124,21 +124,19 @@ fn main() {
             remote,
             marker_size,
             file_path,
-        } => {
-            match merge(
-                Path::new(&base),
-                Path::new(&local),
-                Path::new(&remote),
-                marker_size.parse().ok(),
-                Path::new(&file_path),
-            ) {
-                Ok(is_automergeable) => std::process::exit(if is_automergeable { 0 } else { 1 }),
-                Err(e) => {
-                    log::error!("Error during merge: {}", e);
-                    std::process::exit(2);
-                }
+        } => match merge(
+            &base,
+            &local,
+            &remote,
+            marker_size.parse().ok(),
+            file_path.as_encoded_bytes(),
+        ) {
+            Ok(is_automergeable) => std::process::exit(if is_automergeable { 0 } else { 1 }),
+            Err(e) => {
+                log::error!("Error during merge: {}", e);
+                std::process::exit(2);
             }
-        }
+        },
         Commands::PreCommit => {
             if let Err(e) = pre_commit() {
                 log::error!("Pre-commit hook failed: {}", e);
@@ -261,7 +259,7 @@ struct GitConfig {
 }
 
 impl GitConfig {
-    fn is_encryption(&mut self, path: &Path) -> Result<bool, Error> {
+    fn is_encryption(&mut self, path: &[u8]) -> Result<bool, Error> {
         if self.encryption_path_regex_instance.is_none() {
             if let Some(ref regex_str) = self.encryption_path_regex {
                 let compiled_regex = Regex::new(regex_str)?;
@@ -273,7 +271,7 @@ impl GitConfig {
         }
         // ここまで来たら正規表現が存在するのでunwrapして使用
         let regex = self.encryption_path_regex_instance.as_ref().unwrap();
-        Ok(regex.is_match(path.to_str().unwrap_or_default()))
+        Ok(regex.is_match(path))
     }
 
     fn is_encrypted_by_key(&mut self, message: &Message) -> Result<bool, Error> {
@@ -340,7 +338,7 @@ impl GitRepository {
     }
 }
 
-fn clean(path: &Path) -> Result<(), Error> {
+fn clean(path: &[u8]) -> Result<(), Error> {
     let mut repo = GitRepository::new()?;
 
     let mut config = load_git_config(&repo)?;
@@ -355,7 +353,7 @@ fn clean(path: &Path) -> Result<(), Error> {
     Ok(())
 }
 
-fn smudge(path: &Path) -> Result<(), Error> {
+fn smudge(path: &[u8]) -> Result<(), Error> {
     let mut repo = GitRepository::new()?;
 
     let mut config = load_git_config(&repo)?;
@@ -374,7 +372,7 @@ fn encrypt(
     key_pair: &KeyPair,
     config: &mut GitConfig,
     data: &[u8],
-    path: &Path,
+    path: &[u8],
     repo: &mut GitRepository,
 ) -> Result<Vec<u8>, Error> {
     if !config.is_encryption(path)? {
@@ -404,7 +402,8 @@ fn encrypt(
     }
 
     // インデックスの内容を取得して復号化を試みる
-    if let Some(index_entry) = repo.repo.index()?.get_path(path, 0)
+    if let Ok(path) = str::from_utf8(path)
+        && let Some(index_entry) = repo.repo.index()?.get_path(Path::new(path), 0)
         && let Ok(blob) = repo.repo.find_blob(index_entry.id)
         && let Ok(message) = Message::from_bytes(blob.content())
         && let Ok(decrypted_data) = message.decrypt(&"".into(), &key_pair.private_key)
@@ -485,7 +484,7 @@ fn decrypt(
     key_pair: &KeyPair,
     data: &[u8],
     repo: &mut GitRepository,
-    path: &Path,
+    path: &[u8],
     config: &mut GitConfig,
 ) -> Result<Vec<u8>, Error> {
     let message = match Message::from_armor(data) {
@@ -564,7 +563,13 @@ fn textconv(path: &Path) -> Result<(), Error> {
 
     let data = fs::read(path)?;
 
-    let decrypted = decrypt(&keypair, &data, &mut repo, path, &mut config)?;
+    let decrypted = decrypt(
+        &keypair,
+        &data,
+        &mut repo,
+        path.as_os_str().as_encoded_bytes(),
+        &mut config,
+    )?;
     std::io::stdout().write_all(&decrypted)?;
 
     Ok(())
@@ -598,7 +603,7 @@ fn pre_commit() -> Result<(), Error> {
     }) {
         let oid = d.new_file().id();
         if let Some(file_path) = d.new_file().path()
-            && config.is_encryption(file_path)?
+            && config.is_encryption(file_path.as_os_str().as_encoded_bytes())?
         {
             let blob = repo.repo.find_blob(oid)?;
             let data = blob.content();
@@ -690,14 +695,20 @@ fn merge(
     local: &Path,
     remote: &Path,
     marker_size: Option<usize>,
-    file_path: &Path,
+    file_path: &[u8],
 ) -> Result<bool, Error> {
     let mut repo = GitRepository::new()?;
     let mut config = load_git_config(&repo)?;
     let keypair = KeyPair::try_from(&config)?;
 
     let base_data = fs::read(base)?;
-    let base_data = decrypt(&keypair, &base_data, &mut repo, base, &mut config)?;
+    let base_data = decrypt(
+        &keypair,
+        &base_data,
+        &mut repo,
+        base.as_os_str().as_encoded_bytes(),
+        &mut config,
+    )?;
     let mut base_obj = MergeFileInput::new();
     base_obj.content(&base_data);
     base_obj.path(base.to_string_lossy().as_ref());
@@ -705,13 +716,25 @@ fn merge(
     let mut local_file = fs::OpenOptions::new().write(true).read(true).open(local)?;
     let mut local_data = Vec::new();
     local_file.read_to_end(&mut local_data)?;
-    let local_data = decrypt(&keypair, &local_data, &mut repo, local, &mut config)?;
+    let local_data = decrypt(
+        &keypair,
+        &local_data,
+        &mut repo,
+        local.as_os_str().as_encoded_bytes(),
+        &mut config,
+    )?;
     let mut local_obj = MergeFileInput::new();
     local_obj.content(&local_data);
     local_obj.path(local.to_string_lossy().as_ref());
 
     let remote_data = fs::read(remote)?;
-    let remote_data = decrypt(&keypair, &remote_data, &mut repo, remote, &mut config)?;
+    let remote_data = decrypt(
+        &keypair,
+        &remote_data,
+        &mut repo,
+        remote.as_os_str().as_encoded_bytes(),
+        &mut config,
+    )?;
     let mut remote_obj = MergeFileInput::new();
     remote_obj.content(&remote_data);
     remote_obj.path(remote.to_string_lossy().as_ref());
@@ -1020,10 +1043,15 @@ impl PktLineProcess {
         };
 
         let data = self.pkt_io.read_pkt_content()?;
-        let path = Path::new(unsafe { OsStr::from_encoded_bytes_unchecked(&pathname) });
 
-        let encrypted = encrypt(&self.keypair, &mut self.config, &data, path, &mut self.repo)
-            .map_err(|e| self.write_error_response(e))?;
+        let encrypted = encrypt(
+            &self.keypair,
+            &mut self.config,
+            &data,
+            &pathname,
+            &mut self.repo,
+        )
+        .map_err(|e| self.write_error_response(e))?;
         self.pkt_io.write_pkt_content(&encrypted)?;
         self.pkt_io.write_flush_pkt()?;
         Ok(())
@@ -1048,10 +1076,15 @@ impl PktLineProcess {
         };
 
         let data = self.pkt_io.read_pkt_content()?;
-        let path = Path::new(unsafe { OsStr::from_encoded_bytes_unchecked(&pathname) });
 
-        let decrypted = decrypt(&self.keypair, &data, &mut self.repo, path, &mut self.config)
-            .map_err(|e| self.write_error_response(e))?;
+        let decrypted = decrypt(
+            &self.keypair,
+            &data,
+            &mut self.repo,
+            &pathname,
+            &mut self.config,
+        )
+        .map_err(|e| self.write_error_response(e))?;
         self.pkt_io.write_pkt_content(&decrypted)?;
         self.pkt_io.write_flush_pkt()?;
         Ok(())
