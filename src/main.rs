@@ -140,7 +140,7 @@ fn main() {
             }
         }
         Commands::Smudge { file_path } => {
-            if let Err(e) = smudge(file_path.as_encoded_bytes()) {
+            if let Err(e) = smudge(&file_path) {
                 log::error!("Error during smudge: {:?}", e);
                 std::process::exit(1);
             }
@@ -380,7 +380,7 @@ fn clean(path: &OsStr) -> Result<(), Error> {
     Ok(())
 }
 
-fn smudge(path: &[u8]) -> Result<(), Error> {
+fn smudge(path: &OsStr) -> Result<(), Error> {
     let mut repo = GitRepository::new()?;
 
     let mut config = load_git_config(&repo)?;
@@ -389,7 +389,13 @@ fn smudge(path: &[u8]) -> Result<(), Error> {
     let mut data = Vec::new();
     std::io::stdin().lock().read_to_end(&mut data)?;
 
-    let decrypted = decrypt(&keypair, &data, &mut repo, path, &mut config)?;
+    let decrypted = decrypt(
+        &keypair,
+        &data,
+        &mut repo,
+        path.as_encoded_bytes(),
+        &mut config,
+    )?;
     std::io::stdout().write_all(&decrypted)?;
 
     Ok(())
