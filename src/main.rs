@@ -151,6 +151,7 @@ fn main() {
             }
         }
         Commands::Textconv { file_path } => {
+            log::debug!("Textconv for file: {:?}", file_path);
             if let Err(e) = textconv(&file_path) {
                 log::error!("Error during textconv: {}", e);
                 std::process::exit(1);
@@ -610,7 +611,7 @@ fn textconv(path: &Path) -> Result<(), Error> {
         &keypair,
         &data,
         &mut repo,
-        path.as_os_str().as_encoded_bytes(),
+        &[], // textconvではパス情報を利用しない
         &mut encryption_policy,
     )?;
     std::io::stdout().write_all(&decrypted)?;
