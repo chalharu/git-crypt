@@ -1048,17 +1048,17 @@ impl PktLineProcess {
         Ok(())
     }
 
-    fn write_error_response(&mut self, e: Error) -> Error {
+    fn write_error_response(&mut self, e: Error) -> Result<(), Error> {
         log::error!("Error occurred: {:?}", e);
         if let Err(e) = self.pkt_io.write_pkt_string("status=error") {
             log::error!("Failed to write error response: {:?}", e);
-            return e;
+            return Err(e);
         }
         if let Err(e) = self.pkt_io.write_flush_pkt() {
             log::error!("Failed to write flush pkt: {:?}", e);
-            return e;
+            return Err(e);
         }
-        e
+        Ok(())
     }
 
     fn command_clean(&mut self) -> Result<(), Error> {
@@ -1077,19 +1077,23 @@ impl PktLineProcess {
         }
 
         let Some(pathname) = pathname else {
-            return Err(self.write_error_response(Error::PathnameIsMissing));
+            return self.write_error_response(Error::PathnameIsMissing);
         };
 
         let data = self.pkt_io.read_pkt_content()?;
 
-        let encrypted = encrypt(
+        let encrypted = match encrypt(
             &self.keypair,
             &mut self.config,
             &data,
             pathname.as_slice(),
             &mut self.repo,
-        )
-        .map_err(|e| self.write_error_response(e))?;
+        ) {
+            Ok(enc) => enc,
+            Err(e) => {
+                return self.write_error_response(e);
+            }
+        };
         self.pkt_io.write_pkt_content(&encrypted)?;
         self.pkt_io.write_flush_pkt()?;
         Ok(())
@@ -1111,19 +1115,23 @@ impl PktLineProcess {
         }
 
         let Some(pathname) = pathname else {
-            return Err(self.write_error_response(Error::PathnameIsMissing));
+            return self.write_error_response(Error::PathnameIsMissing);
         };
 
         let data = self.pkt_io.read_pkt_content()?;
 
-        let decrypted = decrypt(
+        let decrypted = match decrypt(
             &self.keypair,
             &data,
             &mut self.repo,
             &pathname,
             &mut self.config,
-        )
-        .map_err(|e| self.write_error_response(e))?;
+        ) {
+            Ok(dec) => dec,
+            Err(e) => {
+                return self.write_error_response(e);
+            }
+        };
         self.pkt_io.write_pkt_content(&decrypted)?;
         self.pkt_io.write_flush_pkt()?;
         Ok(())
