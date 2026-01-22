@@ -1062,7 +1062,11 @@ impl PktLineProcess {
         const PATHNAME_PREFIX: &[u8] = b"pathname=";
         while let Some(payload) = self.pkt_io.read_pkt_line()?.without_eof()? {
             if payload.starts_with(PATHNAME_PREFIX) {
-                pathname = Some(payload.split_at(PATHNAME_PREFIX.len()).1.to_vec());
+                let mut data = payload.split_at(PATHNAME_PREFIX.len()).1.to_vec();
+                if data.ends_with(b"\n") {
+                    data.pop();
+                }
+                pathname = Some(data);
             } else {
                 log::warn!(
                     "Unknown command arguments: {}",
@@ -1095,7 +1099,11 @@ impl PktLineProcess {
         const PATHNAME_PREFIX: &[u8] = b"pathname=";
         while let Some(payload) = self.pkt_io.read_pkt_line()?.without_eof()? {
             if payload.starts_with(PATHNAME_PREFIX) {
-                pathname = Some(payload.split_at(PATHNAME_PREFIX.len()).1.to_vec());
+                let mut data = payload.split_at(PATHNAME_PREFIX.len()).1.to_vec();
+                if data.ends_with(b"\n") {
+                    data.pop();
+                }
+                pathname = Some(data);
             } else {
                 log::warn!(
                     "Unknown command arguments: {}",
