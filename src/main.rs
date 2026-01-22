@@ -433,7 +433,7 @@ fn encrypt<'a, T: 'a + ToPath<'a>>(
         };
     };
 
-    if let Ok(message) = Message::from_bytes(data)
+    if let Ok((message, _)) = Message::from_armor(data)
         && config.is_encrypted_by_key(&message)?
     {
         // すでに指定されたキーIDに一致する公開鍵で暗号化されている場合、そのまま出力
@@ -444,7 +444,7 @@ fn encrypt<'a, T: 'a + ToPath<'a>>(
     if let Some(path) = path.to_path()
         && let Some(index_entry) = repo.repo.index()?.get_path(Path::new(path), 0)
         && let Ok(blob) = repo.repo.find_blob(index_entry.id)
-        && let Ok(message) = Message::from_bytes(blob.content())
+        && let Ok((message, _)) = Message::from_armor(blob.content())
         && let Ok(decrypted_data) = message.decrypt(&"".into(), &key_pair.private_key)
     {
         // インデックスの内容を復号化できた場合、復号化した内容と同一ならば再暗号化せずにそのまま出力
