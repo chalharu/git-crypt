@@ -125,17 +125,15 @@ fn main() {
             std::process::exit(1);
         }
         log::debug!("Debug mode is enabled");
-    } else {
-        if let Err(e) = stderrlog::new()
-            .module(module_path!())
-            .verbosity(0)
-            .timestamp(stderrlog::Timestamp::Off)
-            .show_level(false)
-            .init()
-        {
-            eprintln!("Failed to initialize logging: {}", e);
-            std::process::exit(1);
-        }
+    } else if let Err(e) = stderrlog::new()
+        .module(module_path!())
+        .verbosity(0)
+        .timestamp(stderrlog::Timestamp::Off)
+        .show_level(false)
+        .init()
+    {
+        eprintln!("Failed to initialize logging: {}", e);
+        std::process::exit(1);
     }
 
     match cli.command {
