@@ -85,6 +85,10 @@ trait ToPath<'a> {
 
 impl<'a> ToPath<'a> for &'a [u8] {
     fn to_path(self) -> Option<&'a Path> {
+        #[cfg(unix)]
+        let path: Result<_, std::convert::Infallible> =
+            Ok(<OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(self));
+        #[cfg(not(unix))]
         let path = str::from_utf8(self);
         match path {
             Ok(s) => Some(Path::new(s)),
