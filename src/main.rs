@@ -744,7 +744,7 @@ fn merge(
     )?;
     let mut base_obj = MergeFileInput::new();
     base_obj.content(&base_data);
-    base_obj.path(base.to_string_lossy().as_ref());
+    base_obj.path(base);
 
     let mut local_file = fs::OpenOptions::new().write(true).read(true).open(local)?;
     let mut local_data = Vec::new();
@@ -758,7 +758,7 @@ fn merge(
     )?;
     let mut local_obj = MergeFileInput::new();
     local_obj.content(&local_data);
-    local_obj.path(local.to_string_lossy().as_ref());
+    local_obj.path(local);
 
     let remote_data = fs::read(remote)?;
     let remote_data = decrypt(
@@ -770,7 +770,7 @@ fn merge(
     )?;
     let mut remote_obj = MergeFileInput::new();
     remote_obj.content(&remote_data);
-    remote_obj.path(remote.to_string_lossy().as_ref());
+    remote_obj.path(remote);
 
     // ここで3-wayマージを実行する
     let mut file_opts = MergeFileOptions::new();
@@ -1068,10 +1068,7 @@ impl PktLineProcess {
                 }
                 pathname = Some(data);
             } else {
-                log::warn!(
-                    "Unknown command arguments: {}",
-                    String::from_utf8_lossy(&payload)
-                );
+                log::warn!("Unknown command arguments: {}", payload.escape_ascii());
             }
         }
 
@@ -1105,10 +1102,7 @@ impl PktLineProcess {
                 }
                 pathname = Some(data);
             } else {
-                log::warn!(
-                    "Unknown command arguments: {}",
-                    String::from_utf8_lossy(&payload)
-                );
+                log::warn!("Unknown command arguments: {}", payload.escape_ascii());
             }
         }
 
