@@ -291,8 +291,14 @@ impl TryFrom<&GitConfig> for KeyPair {
     fn try_from(config: &GitConfig) -> Result<Self, Error> {
         let public_key = read_public_key(&fs::read(&config.public_key)?)?;
         log::debug!("Loaded public key: {}", public_key.fingerprint());
+        for subkey in public_key.public_subkeys.iter() {
+            log::debug!("  Subkey: {}", subkey.key_id(),);
+        }
         let private_key = read_secret_key(&fs::read(&config.private_key)?)?;
         log::debug!("Loaded private key: {}", private_key.fingerprint());
+        for subkey in private_key.secret_subkeys.iter() {
+            log::debug!("  Subkey: {}", subkey.key_id(),);
+        }
         Ok(KeyPair {
             public_key,
             private_key,
@@ -391,6 +397,7 @@ impl EncryptionPolicy {
 
     fn is_encrypted_for_configured_key(&mut self, message: &Message) -> Result<bool, Error> {
         if let Some(key_id) = self.configured_key_id_bytes()? {
+            // log::debug!("Checking message: {:?}", message);
             if let Message::Encrypted { esk, .. } = message {
                 for e in esk.iter() {
                     if let Esk::PublicKeyEncryptedSessionKey(pubkey) = e
