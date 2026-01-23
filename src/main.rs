@@ -473,6 +473,7 @@ fn encrypt<'a, T: 'a + ToPath<'a>>(
 ) -> Result<Vec<u8>, Error> {
     if !encryption_policy.should_encrypt_file_path(path.as_bytes())? {
         // 暗号化対象外のファイルの場合はそのまま出力
+        log::debug!("File is not subject to encryption, outputting raw data");
         return Ok(data.to_vec());
     }
     // git hash-objectとして登録
@@ -483,6 +484,8 @@ fn encrypt<'a, T: 'a + ToPath<'a>>(
         && let Some(ref_target) = encrypt_obj.target()
     {
         // encrypt_refが存在する = このマシンで暗号化したことがある
+        log::debug!("Cache hit for encryption {}", encrypt_ref);
+        log::debug!("Using cached encrypted object {}", ref_target);
         match repo.repo.find_blob(ref_target) {
             Ok(encrypt_obj) => return Ok(encrypt_obj.content().to_vec()),
             Err(e) if e.code() != git2::ErrorCode::NotFound => return Err(e.into()),
@@ -493,6 +496,7 @@ fn encrypt<'a, T: 'a + ToPath<'a>>(
     if let Ok((message, _)) = Message::from_armor(data)
         && encryption_policy.is_encrypted_for_configured_key(&message)?
     {
+        log::debug!("Data is already encrypted for the configured key, outputting raw data");
         // すでに指定されたキーIDに一致する公開鍵で暗号化されている場合、そのまま出力
         return Ok(data.to_vec());
     }
@@ -500,30 +504,61 @@ fn encrypt<'a, T: 'a + ToPath<'a>>(
     // インデックスの内容を取得して復号化を試みる
     if let Some(path) = path.to_path()
         && let Some(index_entry) = repo.repo.index()?.get_path(Path::new(path), 0)
-        && let Ok(blob) = repo.repo.find_blob(index_entry.id)
-        && let Ok((message, _)) = Message::from_armor(blob.content())
-        && let Ok(decrypted_data) = message.decrypt(&"".into(), &key_pair.private_key)
     {
-        // インデックスの内容を復号化できた場合、復号化した内容と同一ならば再暗号化せずにそのまま出力
-        if let Some(mut decompressed_data) = if decrypted_data.is_compressed() {
-            decrypted_data.decompress().ok()
-        } else {
-            Some(decrypted_data)
-        } && let Ok(decompressed_bytes) = decompressed_data.as_data_vec()
-            && decompressed_bytes.iter().eq(data.iter())
+        log::debug!("Found index entry for path: {:?}", path);
+        if let Ok(blob) = repo.repo.find_blob(index_entry.id)
+            && let Ok((message, _)) = Message::from_armor(blob.content())
         {
-            // キャッシュ化
-            let raw_ref = format!("refs/crypt-cache/decrypt/{}", index_entry.id);
+            log::debug!("Index entry is a valid PGP message, attempting decryption");
+            // 復号化処理
+            let decrypt_options = DecryptionOptions::new().enable_gnupg_aead().enable_legacy();
+            let password = "".into();
+            let ring = TheRing {
+                secret_keys: vec![&key_pair.private_key],
+                key_passwords: vec![&password],
+                decrypt_options,
+                ..Default::default()
+            };
+            match message.decrypt_the_ring(ring, true) {
+                Ok((decrypted_data, _)) => {
+                    log::debug!("Decrypted data successfully");
+                    // インデックスの内容を復号化できた場合、復号化した内容と同一ならば再暗号化せずにそのまま出力
+                    if let Some(mut decompressed_data) = if decrypted_data.is_compressed() {
+                        decrypted_data.decompress().ok()
+                    } else {
+                        Some(decrypted_data)
+                    } && let Ok(decompressed_bytes) = decompressed_data.as_data_vec()
+                        && decompressed_bytes.iter().eq(data.iter())
+                    {
+                        log::debug!(
+                            "Decrypted data matches the input data, using cached encrypted object"
+                        );
+                        // キャッシュ化
+                        let raw_ref = format!("refs/crypt-cache/decrypt/{}", index_entry.id);
 
-            // 失敗しても無視
-            let _ = repo
-                .repo
-                .reference(&encrypt_ref, index_entry.id, true, "Update encrypt cache");
-            let _ = repo
-                .repo
-                .reference(&raw_ref, oid, true, "Update decrypt cache")?;
+                        // 失敗しても無視
+                        if let Err(e) = repo.repo.reference(
+                            &encrypt_ref,
+                            index_entry.id,
+                            true,
+                            "Update encrypt cache",
+                        ) {
+                            log::warn!("Failed to update encrypt cache reference: {}", e);
+                        }
+                        if let Err(e) =
+                            repo.repo
+                                .reference(&raw_ref, oid, true, "Update decrypt cache")
+                        {
+                            log::warn!("Failed to update decrypt cache reference: {}", e);
+                        }
 
-            return Ok(blob.content().to_vec());
+                        return Ok(blob.content().to_vec());
+                    }
+                }
+                Err(e) => {
+                    log::debug!("Failed to decrypt index entry: {:?}", e);
+                }
+            }
         }
     }
 
@@ -560,15 +595,22 @@ fn encrypt<'a, T: 'a + ToPath<'a>>(
 
     // キャッシュ化
     if let Ok(encrypt_obj_oid) = repo.repo.blob(encrypted.as_bytes()) {
+        log::debug!("Caching encrypted object");
         // hash-objectの書き込みに成功した場合のみrefを更新
         // 失敗した場合でも出力自体は成功しているため、処理は継続
         let raw_ref = format!("refs/crypt-cache/decrypt/{}", encrypt_obj_oid);
-        let _ = repo
+        if let Err(e) =
+            repo.repo
+                .reference(&encrypt_ref, encrypt_obj_oid, true, "Update encrypt cache")
+        {
+            log::warn!("Failed to update encrypt cache reference: {}", e);
+        }
+        if let Err(e) = repo
             .repo
-            .reference(&encrypt_ref, encrypt_obj_oid, true, "Update encrypt cache");
-        let _ = repo
-            .repo
-            .reference(&raw_ref, oid, true, "Update decrypt cache");
+            .reference(&raw_ref, oid, true, "Update decrypt cache")
+        {
+            log::warn!("Failed to update decrypt cache reference: {}", e);
+        }
     }
 
     Ok(encrypted.as_bytes().to_vec())
