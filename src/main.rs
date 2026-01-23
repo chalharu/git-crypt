@@ -156,7 +156,7 @@ fn main() {
 
     if cli.debug {
         if let Err(e) = stderrlog::new()
-            .module(module_path!())
+            .show_module_names(true)
             .verbosity(3)
             .timestamp(stderrlog::Timestamp::Second)
             .init()
