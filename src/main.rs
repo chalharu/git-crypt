@@ -112,6 +112,45 @@ impl<'a> ToPath<'a> for &'a OsStr {
     }
 }
 
+fn should_convert_wsl_path() -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        let mut sys = sysinfo::System::new();
+        sys.refresh_processes(sysinfo::ProcessesToUpdate::All, false);
+        if let Ok(pid) = sysinfo::get_current_pid()
+            && let Some(mut process) = sys.process(pid)
+        {
+            while let Some(ppid) = process.parent()
+                && let Some(parent_process) = sys.process(ppid)
+            {
+                if parent_process.name().eq_ignore_ascii_case("wsl.exe") {
+                    log::debug!("Detected WSL parent process");
+                    return true;
+                }
+                process = parent_process;
+            }
+        }
+    }
+    false
+}
+
+fn convert_wsl_path_to_windows(path: &Path) -> Option<PathBuf> {
+    #[cfg(target_os = "windows")]
+    if let Ok(output) = std::process::Command::new("wsl")
+        .arg("wslpath")
+        .arg("-w")
+        .arg(path.as_os_str())
+        .output()
+        && output.status.success()
+        && let Ok(converted_path) = String::from_utf8(output.stdout)
+    {
+        let converted_path = converted_path.trim();
+        log::debug!("Converted WSL path: {}", converted_path);
+        return Some(PathBuf::from(converted_path));
+    }
+    None
+}
+
 fn main() {
     let cli = Cli::parse();
 
@@ -150,8 +189,20 @@ fn main() {
                 std::process::exit(1);
             }
         }
-        Commands::Textconv { file_path } => {
+        Commands::Textconv { mut file_path } => {
             log::debug!("Textconv for file: {:?}", file_path);
+            // Windows環境では、WSL上のGitから呼び出された場合に、パスがUnix形式になるため、
+            // Windowsのパスに変換する必要がある。
+            #[cfg(target_os = "windows")]
+            if should_convert_wsl_path() {
+                if let Some(converted_path) = convert_wsl_path_to_windows(&file_path) {
+                    file_path = converted_path;
+                } else {
+                    log::debug!("WSL path conversion failed");
+                    std::process::exit(1);
+                }
+            }
+
             if let Err(e) = textconv(&file_path) {
                 log::error!("Error during textconv: {}", e);
                 std::process::exit(1);
@@ -350,6 +401,10 @@ impl EncryptionPolicy {
                         return Ok(true);
                     }
                 }
+                log::debug!(
+                    "Message is not encrypted for the configured key ID: {:x?}",
+                    key_id
+                );
             }
         } else {
             // キーIDが指定されていない場合、すでに暗号化されているならそのまま出力
@@ -536,16 +591,20 @@ fn decrypt(
                 .unwrap_or(false)
             {
                 log::error!("Not a valid PGP message ({:?}), outputting raw data", e);
+            } else {
+                log::debug!("Not a valid PGP message ({:?}), outputting raw data", e);
             }
             return Ok(data.to_vec());
         }
     };
     if !message.is_encrypted() {
         // 暗号化されていない場合はそのまま出力
+        log::debug!("Message is not encrypted, outputting raw data");
         return Ok(data.to_vec());
     }
     if !encryption_policy.is_encrypted_for_configured_key(&message)? {
         // 指定されたキーIDに一致する公開鍵で暗号化されていない場合はそのまま出力
+        log::debug!("Message is not encrypted for the configured key, outputting raw data");
         return Ok(data.to_vec());
     }
 
@@ -556,6 +615,7 @@ fn decrypt(
         && let Some(ref_target) = decrypt_obj.target()
         && let Ok(decrypt_blob) = repo.repo.find_blob(ref_target)
     {
+        log::debug!("Cache hit for decryption");
         // キャッシュヒット
         return Ok(decrypt_blob.content().to_vec());
     }
@@ -572,27 +632,41 @@ fn decrypt(
     let (decrypted_message, _) = match message.decrypt_the_ring(ring, true) {
         Ok(msg) => msg,
         Err(pgp::errors::Error::MissingKey) => {
+            log::debug!("Missing decryption key");
             // 復号化キーが見つからない場合はそのまま出力
             return Ok(data.to_vec());
         }
         Err(e) => return Err(e.into()),
     };
     let mut decompressed_data = if decrypted_message.is_compressed() {
+        log::debug!("Decompressed data");
         decrypted_message.decompress()?
     } else {
+        log::debug!("Data is not compressed");
         decrypted_message
     };
     let decrypted_bytes = decompressed_data.as_data_vec()?;
 
     // キャッシュ化
     if let Ok(decrypt_obj_oid) = repo.repo.blob(decrypted_bytes.as_slice()) {
+        log::debug!("Caching decrypted object");
         let encrypt_ref = format!("refs/crypt-cache/encrypt/{}", decrypt_obj_oid);
-        let _ = repo
+        if let Err(e) = repo
             .repo
-            .reference(&encrypt_ref, oid, true, "Update encrypt cache");
-        let _ = repo
-            .repo
-            .reference(&decrypt_ref, decrypt_obj_oid, true, "Update decrypt cache");
+            .reference(&encrypt_ref, oid, true, "Update encrypt cache")
+        {
+            log::warn!("Failed to update encrypt cache reference: {}", e);
+        } else {
+            log::debug!("Updated encrypt cache reference: {}", encrypt_ref);
+        }
+        if let Err(e) =
+            repo.repo
+                .reference(&decrypt_ref, decrypt_obj_oid, true, "Update decrypt cache")
+        {
+            log::warn!("Failed to update decrypt cache reference: {}", e);
+        } else {
+            log::debug!("Updated decrypt cache reference: {}", decrypt_ref);
+        }
     }
     Ok(decrypted_bytes)
 }

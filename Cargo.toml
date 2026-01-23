@@ -12,6 +12,7 @@ pgp = "0.18.0"
 rand = "0.8.5" # pgpで使われているrandのバージョンが0.8.5のため、合わせる必要がある。
 regex = "1.12.2"
 stderrlog = "0.6.0"
+sysinfo = { version = "0.37.2", default-features = false, features = ["system", "windows"] }
 thiserror = "2.0.18"
 
 [profile.release]
