@@ -112,30 +112,28 @@ impl<'a> ToPath<'a> for &'a OsStr {
     }
 }
 
+#[cfg(target_os = "windows")]
 fn should_convert_wsl_path() -> bool {
-    #[cfg(target_os = "windows")]
+    let mut sys = sysinfo::System::new();
+    sys.refresh_processes(sysinfo::ProcessesToUpdate::All, false);
+    if let Ok(pid) = sysinfo::get_current_pid()
+        && let Some(mut process) = sys.process(pid)
     {
-        let mut sys = sysinfo::System::new();
-        sys.refresh_processes(sysinfo::ProcessesToUpdate::All, false);
-        if let Ok(pid) = sysinfo::get_current_pid()
-            && let Some(mut process) = sys.process(pid)
+        while let Some(ppid) = process.parent()
+            && let Some(parent_process) = sys.process(ppid)
         {
-            while let Some(ppid) = process.parent()
-                && let Some(parent_process) = sys.process(ppid)
-            {
-                if parent_process.name().eq_ignore_ascii_case("wsl.exe") {
-                    log::debug!("Detected WSL parent process");
-                    return true;
-                }
-                process = parent_process;
+            if parent_process.name().eq_ignore_ascii_case("wsl.exe") {
+                log::debug!("Detected WSL parent process");
+                return true;
             }
+            process = parent_process;
         }
     }
     false
 }
 
+#[cfg(target_os = "windows")]
 fn convert_wsl_path_to_windows(path: &Path) -> Option<PathBuf> {
-    #[cfg(target_os = "windows")]
     if let Ok(output) = std::process::Command::new("wsl")
         .arg("wslpath")
         .arg("-w")
@@ -189,6 +187,7 @@ fn main() {
                 std::process::exit(1);
             }
         }
+        #[allow(unused_mut)]
         Commands::Textconv { mut file_path } => {
             log::debug!("Textconv for file: {:?}", file_path);
             // Windows環境では、WSL上のGitから呼び出された場合に、パスがUnix形式になるため、
