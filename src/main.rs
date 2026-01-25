@@ -204,7 +204,6 @@ fn main() {
                 std::process::exit(1);
             }
         }
-        #[allow(unused_mut)]
         Commands::Textconv { file_path } => {
             log::debug!("Textconv for file: {:?}", file_path);
             let Ok(file_path) = normalize_path(&file_path) else {
