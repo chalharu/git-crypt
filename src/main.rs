@@ -149,6 +149,23 @@ fn convert_wsl_path_to_windows(path: &Path) -> Option<PathBuf> {
     None
 }
 
+fn normalize_path<P: AsRef<Path>>(path: P) -> Result<PathBuf, Error> {
+    // Windows環境では、WSL上のGitから呼び出された場合に、パスがUnix形式になるため、
+    // Windowsのパスに変換する必要がある。
+    #[cfg(target_os = "windows")]
+    if should_convert_wsl_path() {
+        if let Some(converted_path) = convert_wsl_path_to_windows(path.as_ref()) {
+            Ok(converted_path)
+        } else {
+            Err(Error::PathnameIsMissing)
+        }
+    } else {
+        Ok(path.as_ref().to_path_buf())
+    }
+    #[cfg(not(target_os = "windows"))]
+    Ok(path.as_ref().to_path_buf())
+}
+
 fn main() {
     let cli = Cli::parse();
 
@@ -188,19 +205,12 @@ fn main() {
             }
         }
         #[allow(unused_mut)]
-        Commands::Textconv { mut file_path } => {
+        Commands::Textconv { file_path } => {
             log::debug!("Textconv for file: {:?}", file_path);
-            // Windows環境では、WSL上のGitから呼び出された場合に、パスがUnix形式になるため、
-            // Windowsのパスに変換する必要がある。
-            #[cfg(target_os = "windows")]
-            if should_convert_wsl_path() {
-                if let Some(converted_path) = convert_wsl_path_to_windows(&file_path) {
-                    file_path = converted_path;
-                } else {
-                    log::debug!("WSL path conversion failed");
-                    std::process::exit(1);
-                }
-            }
+            let Ok(file_path) = normalize_path(&file_path) else {
+                log::debug!("WSL path conversion failed");
+                std::process::exit(1);
+            };
 
             if let Err(e) = textconv(&file_path) {
                 log::error!("Error during textconv: {}", e);
@@ -213,13 +223,28 @@ fn main() {
             remote,
             marker_size,
             file_path,
-        } => match merge(&base, &local, &remote, marker_size.parse().ok(), &file_path) {
-            Ok(is_automergeable) => std::process::exit(if is_automergeable { 0 } else { 1 }),
-            Err(e) => {
-                log::error!("Error during merge: {}", e);
-                std::process::exit(2);
+        } => {
+            // WSLパスの変換
+            let Ok(base) = normalize_path(&base) else {
+                log::debug!("WSL path conversion failed");
+                std::process::exit(1);
+            };
+            let Ok(local) = normalize_path(&local) else {
+                log::debug!("WSL path conversion failed");
+                std::process::exit(1);
+            };
+            let Ok(remote) = normalize_path(&remote) else {
+                log::debug!("WSL path conversion failed");
+                std::process::exit(1);
+            };
+            match merge(&base, &local, &remote, marker_size.parse().ok(), &file_path) {
+                Ok(is_automergeable) => std::process::exit(if is_automergeable { 0 } else { 1 }),
+                Err(e) => {
+                    log::error!("Error during merge: {}", e);
+                    std::process::exit(2);
+                }
             }
-        },
+        }
         Commands::PreCommit => {
             if let Err(e) = pre_commit() {
                 log::error!("Pre-commit hook failed: {}", e);
