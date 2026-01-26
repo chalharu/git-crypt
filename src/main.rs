@@ -4,8 +4,7 @@ use std::{
     ffi::{OsStr, OsString},
     fs,
     io::{
-        self, BufRead, BufReader, BufWriter, ErrorKind, Read as _, Seek, StdinLock, StdoutLock,
-        Write as _,
+        self, BufRead, BufReader, BufWriter, ErrorKind, Read, Seek, StdinLock, StdoutLock, Write,
     },
     path::{Path, PathBuf},
     rc::Rc,
@@ -614,8 +613,9 @@ fn encrypt<'a, T: 'a + ToPath<'a>>(
         {
             log::debug!("Index entry is a valid PGP message, attempting decryption");
 
-            match decrypt_message(message, key_pair) {
-                Ok(decrypted_bytes) => {
+            let mut decrypted_bytes = Vec::new();
+            match decrypt_message(message, key_pair, &mut decrypted_bytes) {
+                Ok(()) => {
                     log::debug!("Decrypted data successfully");
                     // インデックスの内容を復号化できた場合、復号化した内容と同一ならば再暗号化せずにそのまま出力
                     if decrypted_bytes.iter().eq(data.iter()) {
@@ -672,7 +672,11 @@ fn encrypt<'a, T: 'a + ToPath<'a>>(
     Ok(encrypted.as_bytes().to_vec())
 }
 
-fn decrypt_message(message: Message, key_pair: &KeyPair) -> Result<Vec<u8>, Error> {
+fn decrypt_message<W: Write>(
+    message: Message,
+    key_pair: &KeyPair,
+    mut writer: W,
+) -> Result<(), Error> {
     // 復号化処理
     let decrypt_options = DecryptionOptions::new().enable_gnupg_aead().enable_legacy();
     let password = "".into();
@@ -697,8 +701,14 @@ fn decrypt_message(message: Message, key_pair: &KeyPair) -> Result<Vec<u8>, Erro
         log::debug!("Data is not compressed");
         decrypted_message
     };
-    let decrypted_bytes = decompressed_data.as_data_vec()?;
-    Ok(decrypted_bytes)
+    let mut buf = [0u8; 8192]; // 8KBバッファ
+    loop {
+        let n = decompressed_data.read(&mut buf)?;
+        if n == 0 {
+            return Ok(());
+        }
+        writer.write_all(&buf[..n])?;
+    }
 }
 
 fn decrypt(
@@ -742,8 +752,9 @@ fn decrypt(
         return Ok(cached);
     }
 
-    let decrypted_bytes = match decrypt_message(message, key_pair) {
-        Ok(bytes) => bytes,
+    let mut decrypted_bytes = Vec::new();
+    match decrypt_message(message, key_pair, &mut decrypted_bytes) {
+        Ok(()) => {}
         Err(Error::MissingKey) => {
             // 復号化キーが見つからない場合はそのまま出力
             log::debug!("Missing decryption key, outputting raw data");
