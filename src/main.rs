@@ -13,7 +13,8 @@ use std::{
 
 use clap::{Parser, Subcommand};
 use git2::{
-    Delta, DiffOptions, MergeFileInput, MergeFileOptions, ObjectType, TreeWalkMode, TreeWalkResult,
+    Delta, DiffOptions, MergeFileInput, MergeFileOptions, ObjectType, Oid, TreeWalkMode,
+    TreeWalkResult,
 };
 use pgp::{
     composed::{
@@ -505,6 +506,76 @@ fn parse_pgp_message<'a, R: BufRead + std::fmt::Debug + Send + 'a>(
     Ok(message)
 }
 
+#[derive(Clone, Copy)]
+enum CacheType {
+    Encrypt,
+    Decrypt,
+}
+
+impl CacheType {
+    fn as_str(&self) -> &'static str {
+        match self {
+            CacheType::Encrypt => "encrypt",
+            CacheType::Decrypt => "decrypt",
+        }
+    }
+}
+
+fn cache_ref_name(oid: Oid, cache_type: CacheType) -> String {
+    format!("refs/crypt-cache/{}/{}", cache_type.as_str(), oid)
+}
+
+fn cache_lookup(
+    repo: &GitRepository,
+    cache_type: CacheType,
+    oid: Oid,
+) -> Result<Option<Vec<u8>>, Error> {
+    let cache_ref = cache_ref_name(oid, cache_type);
+    let cache_obj = match repo.repo.find_reference(&cache_ref) {
+        Ok(r) => r,
+        Err(e) if e.code() == git2::ErrorCode::NotFound => {
+            log::debug!("Cache miss for {}: {}", cache_type.as_str(), cache_ref);
+            return Ok(None);
+        }
+        Err(e) => return Err(e.into()),
+    };
+    let Some(ref_target) = cache_obj.target() else {
+        log::debug!("Cache reference found but has no target: {}", cache_ref);
+        return Ok(None);
+    };
+    let cache_blob = match repo.repo.find_blob(ref_target) {
+        Ok(blob) => blob,
+        Err(e) if e.code() == git2::ErrorCode::NotFound => {
+            log::debug!("Cache reference found but blob not found: {}", cache_ref);
+            return Ok(None);
+        }
+        Err(e) => return Err(e.into()),
+    };
+    log::debug!("Cache hit for {}: {}", cache_type.as_str(), cache_ref);
+    Ok(Some(cache_blob.content().to_vec()))
+}
+
+fn cache_update(repo: &GitRepository, raw_oid: Oid, encrypted_oid: Oid) {
+    // キャッシュ化
+    log::debug!("Caching encrypted object");
+    // hash-objectの書き込みに成功した場合のみrefを更新
+    // 失敗した場合でも出力自体は成功しているため、処理は継続
+    let encrypt_ref = cache_ref_name(raw_oid, CacheType::Encrypt);
+    let raw_ref = cache_ref_name(encrypted_oid, CacheType::Decrypt);
+    if let Err(e) = repo
+        .repo
+        .reference(&encrypt_ref, encrypted_oid, true, "Update encrypt cache")
+    {
+        log::warn!("Failed to update encrypt cache reference: {}", e);
+    }
+    if let Err(e) = repo
+        .repo
+        .reference(&raw_ref, raw_oid, true, "Update decrypt cache")
+    {
+        log::warn!("Failed to update decrypt cache reference: {}", e);
+    }
+}
+
 fn encrypt<'a, T: 'a + ToPath<'a>>(
     key_pair: &KeyPair,
     data: &[u8],
@@ -520,19 +591,10 @@ fn encrypt<'a, T: 'a + ToPath<'a>>(
     // git hash-objectとして登録
     let oid = repo.repo.blob(data)?;
 
-    let encrypt_ref = format!("refs/crypt-cache/encrypt/{}", oid);
-    if let Ok(encrypt_obj) = repo.repo.find_reference(&encrypt_ref)
-        && let Some(ref_target) = encrypt_obj.target()
-    {
+    if let Some(cached) = cache_lookup(repo, CacheType::Encrypt, oid)? {
         // encrypt_refが存在する = このマシンで暗号化したことがある
-        log::debug!("Cache hit for encryption {}", encrypt_ref);
-        log::debug!("Using cached encrypted object {}", ref_target);
-        match repo.repo.find_blob(ref_target) {
-            Ok(encrypt_obj) => return Ok(encrypt_obj.content().to_vec()),
-            Err(e) if e.code() != git2::ErrorCode::NotFound => return Err(e.into()),
-            _ => {}
-        };
-    };
+        return Ok(cached);
+    }
 
     if let Ok(message) = parse_pgp_message(BufReader::new(data))
         && encryption_policy.is_encrypted_for_configured_key(&message)?
@@ -560,25 +622,7 @@ fn encrypt<'a, T: 'a + ToPath<'a>>(
                         log::debug!(
                             "Decrypted data matches the input data, using cached encrypted object"
                         );
-                        // キャッシュ化
-                        let raw_ref = format!("refs/crypt-cache/decrypt/{}", index_entry.id);
-
-                        // 失敗しても無視
-                        if let Err(e) = repo.repo.reference(
-                            &encrypt_ref,
-                            index_entry.id,
-                            true,
-                            "Update encrypt cache",
-                        ) {
-                            log::warn!("Failed to update encrypt cache reference: {}", e);
-                        }
-                        if let Err(e) =
-                            repo.repo
-                                .reference(&raw_ref, oid, true, "Update decrypt cache")
-                        {
-                            log::warn!("Failed to update decrypt cache reference: {}", e);
-                        }
-
+                        cache_update(repo, oid, index_entry.id);
                         return Ok(blob.content().to_vec());
                     }
                 }
@@ -622,22 +666,7 @@ fn encrypt<'a, T: 'a + ToPath<'a>>(
 
     // キャッシュ化
     if let Ok(encrypt_obj_oid) = repo.repo.blob(encrypted.as_bytes()) {
-        log::debug!("Caching encrypted object");
-        // hash-objectの書き込みに成功した場合のみrefを更新
-        // 失敗した場合でも出力自体は成功しているため、処理は継続
-        let raw_ref = format!("refs/crypt-cache/decrypt/{}", encrypt_obj_oid);
-        if let Err(e) =
-            repo.repo
-                .reference(&encrypt_ref, encrypt_obj_oid, true, "Update encrypt cache")
-        {
-            log::warn!("Failed to update encrypt cache reference: {}", e);
-        }
-        if let Err(e) = repo
-            .repo
-            .reference(&raw_ref, oid, true, "Update decrypt cache")
-        {
-            log::warn!("Failed to update decrypt cache reference: {}", e);
-        }
+        cache_update(repo, oid, encrypt_obj_oid);
     }
 
     Ok(encrypted.as_bytes().to_vec())
@@ -708,14 +737,9 @@ fn decrypt(
 
     // キャッシュ確認
     let oid = repo.repo.blob(data)?;
-    let decrypt_ref = format!("refs/crypt-cache/decrypt/{}", oid);
-    if let Ok(decrypt_obj) = repo.repo.find_reference(&decrypt_ref)
-        && let Some(ref_target) = decrypt_obj.target()
-        && let Ok(decrypt_blob) = repo.repo.find_blob(ref_target)
-    {
-        log::debug!("Cache hit for decryption");
+    if let Some(cached) = cache_lookup(repo, CacheType::Decrypt, oid)? {
         // キャッシュヒット
-        return Ok(decrypt_blob.content().to_vec());
+        return Ok(cached);
     }
 
     let decrypted_bytes = match decrypt_message(message, key_pair) {
@@ -731,23 +755,7 @@ fn decrypt(
     // キャッシュ化
     if let Ok(decrypt_obj_oid) = repo.repo.blob(decrypted_bytes.as_slice()) {
         log::debug!("Caching decrypted object");
-        let encrypt_ref = format!("refs/crypt-cache/encrypt/{}", decrypt_obj_oid);
-        if let Err(e) = repo
-            .repo
-            .reference(&encrypt_ref, oid, true, "Update encrypt cache")
-        {
-            log::warn!("Failed to update encrypt cache reference: {}", e);
-        } else {
-            log::debug!("Updated encrypt cache reference: {}", encrypt_ref);
-        }
-        if let Err(e) =
-            repo.repo
-                .reference(&decrypt_ref, decrypt_obj_oid, true, "Update decrypt cache")
-        {
-            log::warn!("Failed to update decrypt cache reference: {}", e);
-        } else {
-            log::debug!("Updated decrypt cache reference: {}", decrypt_ref);
-        }
+        cache_update(repo, decrypt_obj_oid, oid);
     }
     Ok(decrypted_bytes)
 }
