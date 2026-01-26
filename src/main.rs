@@ -557,7 +557,7 @@ fn cache_lookup(
 
 fn cache_update(repo: &GitRepository, raw_oid: Oid, encrypted_oid: Oid) {
     // キャッシュ化
-    log::debug!("Caching encrypted object");
+    log::debug!("Caching object");
     // hash-objectの書き込みに成功した場合のみrefを更新
     // 失敗した場合でも出力自体は成功しているため、処理は継続
     let encrypt_ref = cache_ref_name(raw_oid, CacheType::Encrypt);
