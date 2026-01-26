@@ -4,7 +4,8 @@ use std::{
     ffi::{OsStr, OsString},
     fs,
     io::{
-        self, BufReader, BufWriter, ErrorKind, Read as _, Seek, StdinLock, StdoutLock, Write as _,
+        self, BufRead, BufReader, BufWriter, ErrorKind, Read as _, Seek, StdinLock, StdoutLock,
+        Write as _,
     },
     path::{Path, PathBuf},
     rc::Rc,
@@ -301,6 +302,8 @@ enum Error {
     InvalidPacketLength,
     #[error("Invalid packet UTF-8: {0}")]
     InvalidPacketUtf8(#[from] std::string::FromUtf8Error),
+    #[error("Missing decryption key")]
+    MissingKey,
 }
 
 #[derive(Debug)]
@@ -494,6 +497,14 @@ fn smudge(path: &OsStr) -> Result<(), Error> {
     Ok(())
 }
 
+fn parse_pgp_message<'a, R: BufRead + std::fmt::Debug + Send + 'a>(
+    input: R,
+) -> Result<Message<'a>, Error> {
+    // form_readerは、ArmoredとBinaryの両方に対応している
+    let (message, _) = Message::from_reader(input)?;
+    Ok(message)
+}
+
 fn encrypt<'a, T: 'a + ToPath<'a>>(
     key_pair: &KeyPair,
     data: &[u8],
@@ -523,7 +534,7 @@ fn encrypt<'a, T: 'a + ToPath<'a>>(
         };
     };
 
-    if let Ok((message, _)) = Message::from_armor(data)
+    if let Ok(message) = parse_pgp_message(BufReader::new(data))
         && encryption_policy.is_encrypted_for_configured_key(&message)?
     {
         log::debug!("Data is already encrypted for the configured key, outputting raw data");
@@ -537,29 +548,15 @@ fn encrypt<'a, T: 'a + ToPath<'a>>(
     {
         log::debug!("Found index entry for path: {:?}", path);
         if let Ok(blob) = repo.repo.find_blob(index_entry.id)
-            && let Ok((message, _)) = Message::from_armor(blob.content())
+            && let Ok(message) = parse_pgp_message(BufReader::new(blob.content()))
         {
             log::debug!("Index entry is a valid PGP message, attempting decryption");
-            // 復号化処理
-            let decrypt_options = DecryptionOptions::new().enable_gnupg_aead().enable_legacy();
-            let password = "".into();
-            let ring = TheRing {
-                secret_keys: vec![&key_pair.private_key],
-                key_passwords: vec![&password],
-                decrypt_options,
-                ..Default::default()
-            };
-            match message.decrypt_the_ring(ring, true) {
-                Ok((decrypted_data, _)) => {
+
+            match decrypt_message(message, key_pair) {
+                Ok(decrypted_bytes) => {
                     log::debug!("Decrypted data successfully");
                     // インデックスの内容を復号化できた場合、復号化した内容と同一ならば再暗号化せずにそのまま出力
-                    if let Some(mut decompressed_data) = if decrypted_data.is_compressed() {
-                        decrypted_data.decompress().ok()
-                    } else {
-                        Some(decrypted_data)
-                    } && let Ok(decompressed_bytes) = decompressed_data.as_data_vec()
-                        && decompressed_bytes.iter().eq(data.iter())
-                    {
+                    if decrypted_bytes.iter().eq(data.iter()) {
                         log::debug!(
                             "Decrypted data matches the input data, using cached encrypted object"
                         );
@@ -646,6 +643,35 @@ fn encrypt<'a, T: 'a + ToPath<'a>>(
     Ok(encrypted.as_bytes().to_vec())
 }
 
+fn decrypt_message(message: Message, key_pair: &KeyPair) -> Result<Vec<u8>, Error> {
+    // 復号化処理
+    let decrypt_options = DecryptionOptions::new().enable_gnupg_aead().enable_legacy();
+    let password = "".into();
+    let ring = TheRing {
+        secret_keys: vec![&key_pair.private_key],
+        key_passwords: vec![&password],
+        decrypt_options,
+        ..Default::default()
+    };
+    let (decrypted_message, _) = match message.decrypt_the_ring(ring, true) {
+        Ok(msg) => msg,
+        Err(pgp::errors::Error::MissingKey) => {
+            // 復号化キーが見つからない場合はそのまま出力
+            return Err(Error::MissingKey);
+        }
+        Err(e) => return Err(e.into()),
+    };
+    let mut decompressed_data = if decrypted_message.is_compressed() {
+        log::debug!("Decompressed data");
+        decrypted_message.decompress()?
+    } else {
+        log::debug!("Data is not compressed");
+        decrypted_message
+    };
+    let decrypted_bytes = decompressed_data.as_data_vec()?;
+    Ok(decrypted_bytes)
+}
+
 fn decrypt(
     key_pair: &KeyPair,
     data: &[u8],
@@ -653,8 +679,8 @@ fn decrypt(
     path: &[u8],
     encryption_policy: &mut EncryptionPolicy,
 ) -> Result<Vec<u8>, Error> {
-    let message = match Message::from_armor(data) {
-        Ok((msg, _)) => msg,
+    let message = match parse_pgp_message(BufReader::new(data)) {
+        Ok(msg) => msg,
         Err(e) => {
             // パケットが不正 = 暗号化されていない場合はそのまま出力
             // 本来は平文と破損を区別したいが、現状では区別できないためそのまま出力
@@ -692,32 +718,15 @@ fn decrypt(
         return Ok(decrypt_blob.content().to_vec());
     }
 
-    // 復号化処理
-    let decrypt_options = DecryptionOptions::new().enable_gnupg_aead().enable_legacy();
-    let password = "".into();
-    let ring = TheRing {
-        secret_keys: vec![&key_pair.private_key],
-        key_passwords: vec![&password],
-        decrypt_options,
-        ..Default::default()
-    };
-    let (decrypted_message, _) = match message.decrypt_the_ring(ring, true) {
-        Ok(msg) => msg,
-        Err(pgp::errors::Error::MissingKey) => {
-            log::debug!("Missing decryption key");
+    let decrypted_bytes = match decrypt_message(message, key_pair) {
+        Ok(bytes) => bytes,
+        Err(Error::MissingKey) => {
             // 復号化キーが見つからない場合はそのまま出力
+            log::debug!("Missing decryption key, outputting raw data");
             return Ok(data.to_vec());
         }
-        Err(e) => return Err(e.into()),
+        Err(e) => return Err(e),
     };
-    let mut decompressed_data = if decrypted_message.is_compressed() {
-        log::debug!("Decompressed data");
-        decrypted_message.decompress()?
-    } else {
-        log::debug!("Data is not compressed");
-        decrypted_message
-    };
-    let decrypted_bytes = decompressed_data.as_data_vec()?;
 
     // キャッシュ化
     if let Ok(decrypt_obj_oid) = repo.repo.blob(decrypted_bytes.as_slice()) {
@@ -800,7 +809,7 @@ fn pre_commit() -> Result<(), Error> {
             let blob = repo.repo.find_blob(oid)?;
             let data = blob.content();
 
-            if let Ok((message, _)) = Message::from_armor(data)
+            if let Ok(message) = parse_pgp_message(BufReader::new(data))
                 && encryption_policy.is_encrypted_for_configured_key(&message)?
             {
                 continue; // 暗号化されているので次へ
