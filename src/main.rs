@@ -1007,7 +1007,9 @@ fn merge(
         &mut encryption_policy,
     )?;
 
-    let remote_data = fs::read(remote)?;
+    let mut remote_file = fs::OpenOptions::new().write(true).read(true).open(remote)?;
+    let mut remote_data = Vec::new();
+    remote_file.read_to_end(&mut remote_data)?;
     let remote_data = decrypt(
         &keypair,
         &remote_data,
@@ -1015,6 +1017,30 @@ fn merge(
         remote.as_os_str().as_encoded_bytes(),
         &mut encryption_policy,
     )?;
+
+    if local_data == remote_data {
+        // ローカルとリモートが同一ならマージ不要
+        log::debug!("Local and remote are identical, no merge needed");
+        return Ok(true);
+    }
+
+    if base_data == remote_data {
+        // ベースとリモートが同一ならローカルをそのまま採用
+        log::debug!("Base and remote are identical, adopting local");
+        return Ok(true);
+    }
+
+    if base_data == local_data {
+        // ベースとローカルが同一ならリモートをそのまま採用
+        log::debug!("Base and local are identical, adopting remote");
+        local_file.seek(io::SeekFrom::Start(0))?; // ファイルポインタを先頭に戻す
+        local_file.set_len(0)?; // ファイルを空にする
+
+        remote_file.seek(io::SeekFrom::Start(0))?; // ファイルポインタを先頭に戻す
+        std::io::copy(&mut remote_file, &mut local_file)?;
+        local_file.flush()?;
+        return Ok(true);
+    }
 
     let mut base_obj = MergeFileInput::new();
     let base_data_blob = repo.repo.find_blob(base_data)?;
