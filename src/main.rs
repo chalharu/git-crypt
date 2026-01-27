@@ -8,11 +8,13 @@ use std::{
     },
     path::{Path, PathBuf},
     rc::Rc,
+    vec,
 };
 
 use clap::{Parser, Subcommand};
 use git2::{
-    Delta, DiffOptions, MergeFileInput, MergeFileOptions, ObjectType, Oid, Repository, TreeWalkMode, TreeWalkResult
+    Delta, DiffOptions, MergeFileInput, MergeFileOptions, ObjectType, Odb, Oid, Repository,
+    TreeWalkMode, TreeWalkResult,
 };
 use pgp::{
     composed::{
@@ -491,9 +493,16 @@ fn smudge(path: &OsStr) -> Result<(), Error> {
         path.as_encoded_bytes(),
         &mut encryption_policy,
     )?;
-    std::io::stdout().write_all(&decrypted)?;
+
+    let odb = repo.repo.odb()?;
+    let mut reader = oid_reader(&odb, decrypted)?;
+    std::io::copy(&mut reader, &mut std::io::stdout())?;
 
     Ok(())
+}
+
+fn oid_reader(odb: &Odb, oid: Oid) -> Result<impl Read, git2::Error> {
+    odb.reader(oid).map(|(r, _, _)| r)
 }
 
 fn parse_pgp_message<'a, R: BufRead + std::fmt::Debug + Send + 'a>(
@@ -521,6 +530,28 @@ impl CacheType {
 
 fn cache_ref_name(oid: Oid, cache_type: CacheType) -> String {
     format!("refs/crypt-cache/{}/{}", cache_type.as_str(), oid)
+}
+
+fn cache_oid_lookup(
+    repo: &GitRepository,
+    cache_type: CacheType,
+    oid: Oid,
+) -> Result<Option<Oid>, Error> {
+    let cache_ref = cache_ref_name(oid, cache_type);
+    let cache_obj = match repo.repo.find_reference(&cache_ref) {
+        Ok(r) => r,
+        Err(e) if e.code() == git2::ErrorCode::NotFound => {
+            log::debug!("Cache miss for {}: {}", cache_type.as_str(), cache_ref);
+            return Ok(None);
+        }
+        Err(e) => return Err(e.into()),
+    };
+    let Some(ref_target) = cache_obj.target() else {
+        log::debug!("Cache reference found but has no target: {}", cache_ref);
+        return Ok(None);
+    };
+    log::debug!("Cache hit for {}: {}", cache_type.as_str(), cache_ref);
+    Ok(Some(ref_target))
 }
 
 fn cache_lookup(
@@ -575,23 +606,6 @@ fn cache_update(repo: &GitRepository, raw_oid: Oid, encrypted_oid: Oid) {
 }
 
 trait IteratorExt: Iterator + Sized {
-    fn eq_fn<I: Iterator, F: Fn(Option<Self::Item>, Option<I::Item>) -> bool>(
-        mut self,
-        mut other: I,
-        f: F,
-    ) -> bool {
-        loop {
-            let x = self.next();
-            let y = other.next();
-            if x.is_none() && y.is_none() {
-                return true;
-            }
-            if !f(x, y) {
-                return false;
-            }
-        }
-    }
-
     fn try_eq_fn<I: Iterator, E, F: Fn(Option<Self::Item>, Option<I::Item>) -> Result<bool, E>>(
         mut self,
         mut other: I,
@@ -753,7 +767,8 @@ fn decrypt(
     repo: &mut GitRepository,
     path: &[u8],
     encryption_policy: &mut EncryptionPolicy,
-) -> Result<Vec<u8>, Error> {
+) -> Result<Oid, Error> {
+    let oid = repo.repo.blob(data)?;
     let message = match parse_pgp_message(BufReader::new(data)) {
         Ok(msg) => msg,
         Err(e) => {
@@ -767,23 +782,22 @@ fn decrypt(
             } else {
                 log::debug!("Not a valid PGP message ({:?}), outputting raw data", e);
             }
-            return Ok(data.to_vec());
+            return Ok(oid);
         }
     };
     if !message.is_encrypted() {
         // 暗号化されていない場合はそのまま出力
         log::debug!("Message is not encrypted, outputting raw data");
-        return Ok(data.to_vec());
+        return Ok(oid);
     }
     if !encryption_policy.is_encrypted_for_configured_key(&message)? {
         // 指定されたキーIDに一致する公開鍵で暗号化されていない場合はそのまま出力
         log::debug!("Message is not encrypted for the configured key, outputting raw data");
-        return Ok(data.to_vec());
+        return Ok(oid);
     }
 
     // キャッシュ確認
-    let oid = repo.repo.blob(data)?;
-    if let Some(cached) = cache_lookup(repo, CacheType::Decrypt, oid)? {
+    if let Some(cached) = cache_oid_lookup(repo, CacheType::Decrypt, oid)? {
         // キャッシュヒット
         return Ok(cached);
     }
@@ -793,7 +807,7 @@ fn decrypt(
         Err(Error::MissingKey) => {
             // 復号化キーが見つからない場合はそのまま出力
             log::debug!("Missing decryption key, outputting raw data");
-            return Ok(data.to_vec());
+            return Ok(oid);
         }
         Err(e) => return Err(e),
     };
@@ -804,7 +818,7 @@ fn decrypt(
     log::debug!("Caching decrypted object");
     cache_update(repo, decrypt_obj_oid, oid);
 
-    Ok(repo.repo.find_blob(decrypt_obj_oid)?.content().to_vec())
+    Ok(decrypt_obj_oid)
 }
 
 fn write_blob<R: Read>(repo: &Repository, reader: R) -> Result<Oid, Error> {
@@ -836,7 +850,10 @@ fn textconv(path: &Path) -> Result<(), Error> {
         &[], // textconvではパス情報を利用しない
         &mut encryption_policy,
     )?;
-    std::io::stdout().write_all(&decrypted)?;
+
+    let odb = repo.repo.odb()?;
+    let mut reader = oid_reader(&odb, decrypted)?;
+    std::io::copy(&mut reader, &mut std::io::stdout())?;
 
     Ok(())
 }
@@ -978,9 +995,6 @@ fn merge(
         base.as_os_str().as_encoded_bytes(),
         &mut encryption_policy,
     )?;
-    let mut base_obj = MergeFileInput::new();
-    base_obj.content(&base_data);
-    base_obj.path(base);
 
     let mut local_file = fs::OpenOptions::new().write(true).read(true).open(local)?;
     let mut local_data = Vec::new();
@@ -992,9 +1006,6 @@ fn merge(
         local.as_os_str().as_encoded_bytes(),
         &mut encryption_policy,
     )?;
-    let mut local_obj = MergeFileInput::new();
-    local_obj.content(&local_data);
-    local_obj.path(local);
 
     let remote_data = fs::read(remote)?;
     let remote_data = decrypt(
@@ -1004,8 +1015,20 @@ fn merge(
         remote.as_os_str().as_encoded_bytes(),
         &mut encryption_policy,
     )?;
+
+    let mut base_obj = MergeFileInput::new();
+    let base_data_blob = repo.repo.find_blob(base_data)?;
+    base_obj.content(base_data_blob.content());
+    base_obj.path(base);
+
+    let mut local_obj = MergeFileInput::new();
+    let local_data_blob = repo.repo.find_blob(local_data)?;
+    local_obj.content(local_data_blob.content());
+    local_obj.path(local);
+
     let mut remote_obj = MergeFileInput::new();
-    remote_obj.content(&remote_data);
+    let remote_data_blob = repo.repo.find_blob(remote_data)?;
+    remote_obj.content(remote_data_blob.content());
     remote_obj.path(remote);
 
     // ここで3-wayマージを実行する
@@ -1015,6 +1038,13 @@ fn merge(
     }
 
     let result = git2::merge_file(&base_obj, &local_obj, &remote_obj, Some(&mut file_opts))?;
+    drop(base_obj);
+    drop(local_obj);
+    drop(remote_obj);
+    drop(base_data_blob);
+    drop(local_data_blob);
+    drop(remote_data_blob);
+
     let encrypted = encrypt(
         &keypair,
         result.content(),
@@ -1126,6 +1156,32 @@ impl PktLineIO {
             let mut line = data.to_string();
             line.push('\n');
             self.write_pkt_line(line.as_bytes())
+        }
+    }
+
+    fn write_pkt_content_with_reader<R: Read>(&mut self, mut data: R) -> Result<(), Error> {
+        self.write_pkt_string("status=success")?;
+        self.write_flush_pkt()?;
+
+        const LARGE_PACKET_MAX: usize = 65520;
+        let mut buf = vec![0u8; LARGE_PACKET_MAX - 4];
+
+        loop {
+            match data.read(&mut buf) {
+                Ok(0) => {
+                    // データが空の場合、そのままフラッシュパケットを送信して終了
+                    self.write_flush_pkt()?;
+                    return Ok(());
+                }
+                Ok(n) => self.write_pkt_line(&buf[..n])?,
+                Err(e) if e.kind() == ErrorKind::Interrupted => {}
+                Err(e) => {
+                    self.write_flush_pkt()?;
+                    self.write_pkt_string("status=abort")?;
+                    self.write_flush_pkt()?;
+                    return Err(Error::Io(e));
+                }
+            }
         }
     }
 
@@ -1364,7 +1420,11 @@ impl PktLineProcess {
                 return self.write_error_response(e);
             }
         };
-        self.pkt_io.write_pkt_content(&decrypted)?;
+
+        let odb = self.repo.repo.odb()?;
+        let mut reader = oid_reader(&odb, decrypted)?;
+
+        self.pkt_io.write_pkt_content_with_reader(&mut reader)?;
         self.pkt_io.write_flush_pkt()?;
         Ok(())
     }
