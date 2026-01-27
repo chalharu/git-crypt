@@ -12,8 +12,7 @@ use std::{
 
 use clap::{Parser, Subcommand};
 use git2::{
-    Delta, DiffOptions, MergeFileInput, MergeFileOptions, ObjectType, Oid, TreeWalkMode,
-    TreeWalkResult,
+    Delta, DiffOptions, MergeFileInput, MergeFileOptions, ObjectType, Oid, Repository, TreeWalkMode, TreeWalkResult
 };
 use pgp::{
     composed::{
@@ -575,6 +574,43 @@ fn cache_update(repo: &GitRepository, raw_oid: Oid, encrypted_oid: Oid) {
     }
 }
 
+trait IteratorExt: Iterator + Sized {
+    fn eq_fn<I: Iterator, F: Fn(Option<Self::Item>, Option<I::Item>) -> bool>(
+        mut self,
+        mut other: I,
+        f: F,
+    ) -> bool {
+        loop {
+            let x = self.next();
+            let y = other.next();
+            if x.is_none() && y.is_none() {
+                return true;
+            }
+            if !f(x, y) {
+                return false;
+            }
+        }
+    }
+
+    fn try_eq_fn<I: Iterator, E, F: Fn(Option<Self::Item>, Option<I::Item>) -> Result<bool, E>>(
+        mut self,
+        mut other: I,
+        f: F,
+    ) -> Result<bool, E> {
+        loop {
+            let x = self.next();
+            let y = other.next();
+            if x.is_none() && y.is_none() {
+                return Ok(true);
+            }
+            if !f(x, y)? {
+                return Ok(false);
+            }
+        }
+    }
+}
+impl<I: Iterator> IteratorExt for I {}
+
 fn encrypt<'a, T: 'a + ToPath<'a>>(
     key_pair: &KeyPair,
     data: &[u8],
@@ -613,12 +649,23 @@ fn encrypt<'a, T: 'a + ToPath<'a>>(
         {
             log::debug!("Index entry is a valid PGP message, attempting decryption");
 
-            let mut decrypted_bytes = Vec::new();
-            match decrypt_message(message, key_pair, &mut decrypted_bytes) {
-                Ok(()) => {
+            match decrypt_message(message, key_pair) {
+                Ok(decrypted_bytes_reader) => {
                     log::debug!("Decrypted data successfully");
                     // インデックスの内容を復号化できた場合、復号化した内容と同一ならば再暗号化せずにそのまま出力
-                    if decrypted_bytes.iter().eq(data.iter()) {
+                    if decrypted_bytes_reader
+                        .bytes()
+                        .try_eq_fn(data.iter(), |x, y| {
+                            if let Some(x) = x
+                                && let Some(y) = y
+                            {
+                                // ここでのエラーはIOエラーなので無視せず伝播させる
+                                x.map(|b| b == *y)
+                            } else {
+                                Ok(false)
+                            }
+                        })?
+                    {
                         log::debug!(
                             "Decrypted data matches the input data, using cached encrypted object"
                         );
@@ -672,11 +719,7 @@ fn encrypt<'a, T: 'a + ToPath<'a>>(
     Ok(encrypted.as_bytes().to_vec())
 }
 
-fn decrypt_message<W: Write>(
-    message: Message,
-    key_pair: &KeyPair,
-    mut writer: W,
-) -> Result<(), Error> {
+fn decrypt_message(message: Message, key_pair: &KeyPair) -> Result<impl Read, Error> {
     // 復号化処理
     let decrypt_options = DecryptionOptions::new().enable_gnupg_aead().enable_legacy();
     let password = "".into();
@@ -694,21 +737,14 @@ fn decrypt_message<W: Write>(
         }
         Err(e) => return Err(e.into()),
     };
-    let mut decompressed_data = if decrypted_message.is_compressed() {
+    let decompressed_data = if decrypted_message.is_compressed() {
         log::debug!("Decompressed data");
         decrypted_message.decompress()?
     } else {
         log::debug!("Data is not compressed");
         decrypted_message
     };
-    let mut buf = [0u8; 8192]; // 8KBバッファ
-    loop {
-        let n = decompressed_data.read(&mut buf)?;
-        if n == 0 {
-            return Ok(());
-        }
-        writer.write_all(&buf[..n])?;
-    }
+    Ok(decompressed_data)
 }
 
 fn decrypt(
@@ -752,9 +788,8 @@ fn decrypt(
         return Ok(cached);
     }
 
-    let mut decrypted_bytes = Vec::new();
-    match decrypt_message(message, key_pair, &mut decrypted_bytes) {
-        Ok(()) => {}
+    let decrypted_bytes_reader = match decrypt_message(message, key_pair) {
+        Ok(decrypted_bytes_reader) => decrypted_bytes_reader,
         Err(Error::MissingKey) => {
             // 復号化キーが見つからない場合はそのまま出力
             log::debug!("Missing decryption key, outputting raw data");
@@ -764,11 +799,24 @@ fn decrypt(
     };
 
     // キャッシュ化
-    if let Ok(decrypt_obj_oid) = repo.repo.blob(decrypted_bytes.as_slice()) {
-        log::debug!("Caching decrypted object");
-        cache_update(repo, decrypt_obj_oid, oid);
-    }
-    Ok(decrypted_bytes)
+    let decrypt_obj_oid = write_blob(&repo.repo, decrypted_bytes_reader)?;
+
+    log::debug!("Caching decrypted object");
+    cache_update(repo, decrypt_obj_oid, oid);
+
+    Ok(repo.repo.find_blob(decrypt_obj_oid)?.content().to_vec())
+}
+
+fn write_blob<R: Read>(repo: &Repository, reader: R) -> Result<Oid, Error> {
+    let writer = repo.blob_writer(None)?;
+    let mut buf_writer = BufWriter::new(writer);
+    let mut buf_reader = BufReader::new(reader);
+    io::copy(&mut buf_reader, &mut buf_writer)?;
+    let oid = match buf_writer.into_inner() {
+        Ok(w) => w.commit()?,
+        Err(e) => return Err(Error::Io(e.into_error())),
+    };
+    Ok(oid)
 }
 
 fn textconv(path: &Path) -> Result<(), Error> {
