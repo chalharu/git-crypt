@@ -470,7 +470,7 @@ fn clean(path: &OsStr) -> Result<(), Error> {
 
     let mut encryption_policy = EncryptionPolicy::new(Rc::new(config));
     let encrypted = encrypt(&keypair, blob_oid, path, &mut repo, &mut encryption_policy)?;
-    
+
     let odb = repo.repo.odb()?;
     let mut reader = oid_reader(&odb, encrypted)?;
     std::io::copy(&mut reader, &mut std::io::stdout())?;
@@ -722,10 +722,10 @@ fn encrypt<'a, T: 'a + ToPath<'a>>(
     builder.compression(CompressionAlgorithm::ZLIB);
     builder.encrypt_to_key(rand::thread_rng(), &encryption_subkey)?;
 
-    let encrypted = builder.to_armored_string(rand::thread_rng(), ArmorOptions::default())?;
+    let mut writer = repo.repo.blob_writer(None)?;
+    builder.to_armored_writer(rand::thread_rng(), ArmorOptions::default(), &mut writer)?;
+    let encrypt_obj_oid = writer.commit()?;
 
-    // キャッシュ化
-    let encrypt_obj_oid = repo.repo.blob(encrypted.as_bytes())?;
     cache_update(repo, oid, encrypt_obj_oid);
 
     Ok(encrypt_obj_oid)
