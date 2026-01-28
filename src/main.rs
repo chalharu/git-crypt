@@ -863,6 +863,7 @@ fn pre_commit() -> Result<(), Error> {
     let repo = GitRepository::new()?;
     let config = GitConfig::load(&repo)?;
     let mut encryption_policy = EncryptionPolicy::new(Rc::new(config));
+    let odb = repo.repo.odb()?;
 
     let diff = repo.repo.diff_tree_to_index(
         repo.repo
@@ -891,10 +892,9 @@ fn pre_commit() -> Result<(), Error> {
             && encryption_policy
                 .should_encrypt_file_path(file_path.as_os_str().as_encoded_bytes())?
         {
-            let blob = repo.repo.find_blob(oid)?;
-            let data = blob.content();
+            let (reader, _, _) = odb.reader(oid)?;
 
-            if let Ok(message) = parse_pgp_message(BufReader::new(data))
+            if let Ok(message) = parse_pgp_message(BufReader::new(DebugReader(reader)))
                 && encryption_policy.is_encrypted_for_configured_key(&message)?
             {
                 continue; // 暗号化されているので次へ
