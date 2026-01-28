@@ -505,7 +505,7 @@ fn clean(path: &OsStr) -> Result<(), Error> {
     let blob_oid = write_blob(&repo.repo, &mut std::io::stdin().lock())?;
 
     let mut encryption_policy = EncryptionPolicy::new(Rc::new(config));
-    let encrypted = encrypt(&keypair, blob_oid, path, &mut repo, &mut encryption_policy)?;
+    let encrypted = encrypt(&keypair, blob_oid, &mut repo, path, &mut encryption_policy)?;
 
     let odb = repo.repo.odb()?;
     let mut reader = oid_reader(&odb, encrypted)?;
@@ -659,8 +659,8 @@ impl<I: Iterator> IteratorExt for I {}
 fn encrypt<'a, T: 'a + ToPath<'a>>(
     key_pair: &KeyPair,
     oid: Oid,
-    path: T,
     repo: &mut GitRepository,
+    path: T,
     encryption_policy: &mut EncryptionPolicy,
 ) -> Result<Oid, Error> {
     if !encryption_policy.should_encrypt_file_path(path.as_bytes())? {
@@ -1145,8 +1145,8 @@ fn merge(
     let encrypted = encrypt(
         &keypair,
         blob_oid,
-        file_path,
         &mut repo,
+        file_path,
         &mut encryption_policy,
     )?;
 
@@ -1398,6 +1398,7 @@ struct PktLineProcess {
     config: Rc<GitConfig>,
 }
 
+#[derive(Clone, Copy)]
 enum ProcessCommand {
     Clean,
     Smudge,
@@ -1551,46 +1552,34 @@ impl PktLineProcess {
         Ok(oid)
     }
 
-    fn command_clean(&mut self, encryption_policy: &mut EncryptionPolicy) -> Result<(), Error> {
+    fn command_clean_or_smudge(
+        &mut self,
+        encryption_policy: &mut EncryptionPolicy,
+        command: ProcessCommand,
+    ) -> Result<(), Error> {
         let args = self.parse_arguments()?;
         let pathname = Self::get_pathname(&args)?;
-        let data = self.read_input(&args, ProcessCommand::Clean)?;
+        let data = self.read_input(&args, command)?;
 
-        let encrypted = match encrypt(
-            &self.keypair,
-            data,
-            pathname,
-            &mut self.repo,
-            encryption_policy,
-        ) {
-            Ok(enc) => enc,
-            Err(e) => {
-                return self.write_error_response(e);
-            }
+        let f = match command {
+            ProcessCommand::Clean => encrypt,
+            ProcessCommand::Smudge => decrypt,
         };
 
-        self.output_content_with_oid(encrypted)
-    }
-
-    fn command_smudge(&mut self, encryption_policy: &mut EncryptionPolicy) -> Result<(), Error> {
-        let args = self.parse_arguments()?;
-        let pathname = Self::get_pathname(&args)?;
-        let data = self.read_input(&args, ProcessCommand::Smudge)?;
-
-        let decrypted = match decrypt(
+        let result_oid = match f(
             &self.keypair,
             data,
             &mut self.repo,
             pathname,
             encryption_policy,
         ) {
-            Ok(dec) => dec,
+            Ok(r) => r,
             Err(e) => {
                 return self.write_error_response(e);
             }
         };
 
-        self.output_content_with_oid(decrypted)
+        self.output_content_with_oid(result_oid)
     }
 
     fn command(&mut self) -> Result<(), Error> {
@@ -1605,11 +1594,11 @@ impl PktLineProcess {
             match payload.as_str() {
                 "command=clean" => {
                     log::debug!("Processing clean command");
-                    self.command_clean(&mut encryption_policy)?;
+                    self.command_clean_or_smudge(&mut encryption_policy, ProcessCommand::Clean)?;
                 }
                 "command=smudge" => {
                     log::debug!("Processing smudge command");
-                    self.command_smudge(&mut encryption_policy)?;
+                    self.command_clean_or_smudge(&mut encryption_policy, ProcessCommand::Smudge)?;
                 }
                 _ => {
                     log::warn!("Unknown command: {}", payload);
