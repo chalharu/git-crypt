@@ -1514,13 +1514,17 @@ impl PktLineProcess {
         Ok(())
     }
 
-    fn command_clean(&mut self, encryption_policy: &mut EncryptionPolicy) -> Result<(), Error> {
+    fn get_pathname(args: &HashMap<Vec<u8>, Vec<u8>>) -> Result<&[u8], Error> {
         const PATHNAME_KEY: &[u8] = b"pathname";
-        let args = self.parse_arguments()?;
-
         let Some(pathname) = args.get(PATHNAME_KEY) else {
-            return self.write_error_response(Error::PathnameIsMissing);
+            return Err(Error::PathnameIsMissing);
         };
+        Ok(pathname.as_slice())
+    }
+
+    fn command_clean(&mut self, encryption_policy: &mut EncryptionPolicy) -> Result<(), Error> {
+        let args = self.parse_arguments()?;
+        let pathname = Self::get_pathname(&args)?;
 
         let reader = self.pkt_io.read_pkt_line_as_reader()?;
         let data = write_blob(&self.repo.repo, reader)?;
@@ -1528,7 +1532,7 @@ impl PktLineProcess {
         let encrypted = match encrypt(
             &self.keypair,
             data,
-            pathname.as_slice(),
+            pathname,
             &mut self.repo,
             encryption_policy,
         ) {
@@ -1542,13 +1546,9 @@ impl PktLineProcess {
     }
 
     fn command_smudge(&mut self, encryption_policy: &mut EncryptionPolicy) -> Result<(), Error> {
-        const PATHNAME_KEY: &[u8] = b"pathname";
         const BLOB_KEY: &[u8] = b"blob";
         let args = self.parse_arguments()?;
-
-        let Some(pathname) = args.get(PATHNAME_KEY) else {
-            return self.write_error_response(Error::PathnameIsMissing);
-        };
+        let pathname = Self::get_pathname(&args)?;
 
         let mut reader = self.pkt_io.read_pkt_line_as_reader()?;
         let data = if let Some(blob) = args.get(BLOB_KEY)
