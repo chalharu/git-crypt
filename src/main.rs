@@ -466,12 +466,14 @@ fn clean(path: &OsStr) -> Result<(), Error> {
     let config = GitConfig::load(&repo)?;
     let keypair = KeyPair::try_from(&config)?;
 
-    let mut data = Vec::new();
-    std::io::stdin().lock().read_to_end(&mut data)?;
+    let blob_oid = write_blob(&repo.repo, &mut std::io::stdin().lock())?;
 
     let mut encryption_policy = EncryptionPolicy::new(Rc::new(config));
-    let encrypted = encrypt(&keypair, &data, path, &mut repo, &mut encryption_policy)?;
-    std::io::stdout().write_all(&encrypted)?;
+    let encrypted = encrypt(&keypair, blob_oid, path, &mut repo, &mut encryption_policy)?;
+    
+    let odb = repo.repo.odb()?;
+    let mut reader = oid_reader(&odb, encrypted)?;
+    std::io::copy(&mut reader, &mut std::io::stdout())?;
 
     Ok(())
 }
@@ -564,30 +566,9 @@ fn cache_oid_lookup(
         log::debug!("Cache reference found but has no target: {}", cache_ref);
         return Ok(None);
     };
-    log::debug!("Cache hit for {}: {}", cache_type.as_str(), cache_ref);
-    Ok(Some(ref_target))
-}
-
-fn cache_lookup(
-    repo: &GitRepository,
-    cache_type: CacheType,
-    oid: Oid,
-) -> Result<Option<Vec<u8>>, Error> {
-    let cache_ref = cache_ref_name(oid, cache_type);
-    let cache_obj = match repo.repo.find_reference(&cache_ref) {
-        Ok(r) => r,
-        Err(e) if e.code() == git2::ErrorCode::NotFound => {
-            log::debug!("Cache miss for {}: {}", cache_type.as_str(), cache_ref);
-            return Ok(None);
-        }
-        Err(e) => return Err(e.into()),
-    };
-    let Some(ref_target) = cache_obj.target() else {
-        log::debug!("Cache reference found but has no target: {}", cache_ref);
-        return Ok(None);
-    };
-    let cache_blob = match repo.repo.find_blob(ref_target) {
-        Ok(blob) => blob,
+    // ターゲットのOIDが存在するか確認
+    match repo.repo.find_blob(ref_target) {
+        Ok(_) => {}
         Err(e) if e.code() == git2::ErrorCode::NotFound => {
             log::debug!("Cache reference found but blob not found: {}", cache_ref);
             return Ok(None);
@@ -595,7 +576,7 @@ fn cache_lookup(
         Err(e) => return Err(e.into()),
     };
     log::debug!("Cache hit for {}: {}", cache_type.as_str(), cache_ref);
-    Ok(Some(cache_blob.content().to_vec()))
+    Ok(Some(ref_target))
 }
 
 fn cache_update(repo: &GitRepository, raw_oid: Oid, encrypted_oid: Oid) {
@@ -641,30 +622,31 @@ impl<I: Iterator> IteratorExt for I {}
 
 fn encrypt<'a, T: 'a + ToPath<'a>>(
     key_pair: &KeyPair,
-    data: &[u8],
+    oid: Oid,
     path: T,
     repo: &mut GitRepository,
     encryption_policy: &mut EncryptionPolicy,
-) -> Result<Vec<u8>, Error> {
+) -> Result<Oid, Error> {
     if !encryption_policy.should_encrypt_file_path(path.as_bytes())? {
         // 暗号化対象外のファイルの場合はそのまま出力
         log::debug!("File is not subject to encryption, outputting raw data");
-        return Ok(data.to_vec());
+        return Ok(oid);
     }
-    // git hash-objectとして登録
-    let oid = repo.repo.blob(data)?;
 
-    if let Some(cached) = cache_lookup(repo, CacheType::Encrypt, oid)? {
+    if let Some(cached) = cache_oid_lookup(repo, CacheType::Encrypt, oid)? {
         // encrypt_refが存在する = このマシンで暗号化したことがある
         return Ok(cached);
     }
 
-    if let Ok(message) = parse_pgp_message(BufReader::new(data))
+    let odb = repo.repo.odb()?;
+    let reader = oid_reader(&odb, oid)?;
+
+    if let Ok(message) = parse_pgp_message(BufReader::new(DebugReader(reader)))
         && encryption_policy.is_encrypted_for_configured_key(&message)?
     {
         log::debug!("Data is already encrypted for the configured key, outputting raw data");
         // すでに指定されたキーIDに一致する公開鍵で暗号化されている場合、そのまま出力
-        return Ok(data.to_vec());
+        return Ok(oid);
     }
 
     // インデックスの内容を取得して復号化を試みる
@@ -672,8 +654,9 @@ fn encrypt<'a, T: 'a + ToPath<'a>>(
         && let Some(index_entry) = repo.repo.index()?.get_path(Path::new(path), 0)
     {
         log::debug!("Found index entry for path: {:?}", path);
-        if let Ok(blob) = repo.repo.find_blob(index_entry.id)
-            && let Ok(message) = parse_pgp_message(BufReader::new(blob.content()))
+
+        if let Ok(blob) = oid_reader(&odb, index_entry.id)
+            && let Ok(message) = parse_pgp_message(BufReader::new(DebugReader(blob)))
         {
             log::debug!("Index entry is a valid PGP message, attempting decryption");
 
@@ -681,14 +664,15 @@ fn encrypt<'a, T: 'a + ToPath<'a>>(
                 Ok(decrypted_bytes_reader) => {
                     log::debug!("Decrypted data successfully");
                     // インデックスの内容を復号化できた場合、復号化した内容と同一ならば再暗号化せずにそのまま出力
+                    let reader = oid_reader(&odb, oid)?;
                     if decrypted_bytes_reader
                         .bytes()
-                        .try_eq_fn(data.iter(), |x, y| {
+                        .try_eq_fn(reader.bytes(), |x, y| {
                             if let Some(x) = x
                                 && let Some(y) = y
                             {
                                 // ここでのエラーはIOエラーなので無視せず伝播させる
-                                x.map(|b| b == *y)
+                                x.and_then(|a| y.map(|b| a == b))
                             } else {
                                 Ok(false)
                             }
@@ -698,7 +682,7 @@ fn encrypt<'a, T: 'a + ToPath<'a>>(
                             "Decrypted data matches the input data, using cached encrypted object"
                         );
                         cache_update(repo, oid, index_entry.id);
-                        return Ok(blob.content().to_vec());
+                        return Ok(index_entry.id);
                     }
                 }
                 Err(e) => {
@@ -732,7 +716,8 @@ fn encrypt<'a, T: 'a + ToPath<'a>>(
         None => return Err(Error::InvalidEncryptionSubkey),
     };
 
-    let mut builder = MessageBuilder::from_bytes("", data.to_vec())
+    let reader = oid_reader(&odb, oid)?;
+    let mut builder = MessageBuilder::from_reader("", reader)
         .seipd_v1(rand::thread_rng(), SymmetricKeyAlgorithm::AES256);
     builder.compression(CompressionAlgorithm::ZLIB);
     builder.encrypt_to_key(rand::thread_rng(), &encryption_subkey)?;
@@ -740,11 +725,10 @@ fn encrypt<'a, T: 'a + ToPath<'a>>(
     let encrypted = builder.to_armored_string(rand::thread_rng(), ArmorOptions::default())?;
 
     // キャッシュ化
-    if let Ok(encrypt_obj_oid) = repo.repo.blob(encrypted.as_bytes()) {
-        cache_update(repo, oid, encrypt_obj_oid);
-    }
+    let encrypt_obj_oid = repo.repo.blob(encrypted.as_bytes())?;
+    cache_update(repo, oid, encrypt_obj_oid);
 
-    Ok(encrypted.as_bytes().to_vec())
+    Ok(encrypt_obj_oid)
 }
 
 fn decrypt_message(message: Message, key_pair: &KeyPair) -> Result<impl Read, Error> {
@@ -1120,9 +1104,11 @@ fn merge(
     drop(local_data_blob);
     drop(remote_data_blob);
 
+    let blob_oid = write_blob(&repo.repo, result.content())?;
+
     let encrypted = encrypt(
         &keypair,
-        result.content(),
+        blob_oid,
         file_path,
         &mut repo,
         &mut encryption_policy,
@@ -1130,7 +1116,9 @@ fn merge(
 
     local_file.seek(io::SeekFrom::Start(0))?; // ファイルポインタを先頭に戻す
     local_file.set_len(0)?; // ファイルを空にする
-    local_file.write_all(&encrypted)?;
+    let odb = repo.repo.odb()?;
+    let mut reader = oid_reader(&odb, encrypted)?;
+    io::copy(&mut reader, &mut local_file)?;
     local_file.flush()?;
 
     Ok(result.is_automergeable())
@@ -1260,21 +1248,6 @@ impl PktLineIO {
         }
     }
 
-    fn write_pkt_content(&mut self, data: &[u8]) -> Result<(), Error> {
-        self.write_pkt_string("status=success")?;
-        self.write_flush_pkt()?;
-
-        const LARGE_PACKET_MAX: usize = 65520;
-        let mut offset = 0;
-        while offset < data.len() {
-            let chunk_size = std::cmp::min(LARGE_PACKET_MAX - 4, data.len() - offset);
-            self.write_pkt_line(&data[offset..offset + chunk_size])?;
-            offset += chunk_size;
-        }
-        self.write_flush_pkt()?;
-        Ok(())
-    }
-
     fn write_flush_pkt(&mut self) -> Result<(), Error> {
         log::debug!("Writing pkt-line: 0000 (flush)");
         self.writer.write_all(b"0000")?;
@@ -1320,14 +1293,6 @@ impl PktLineIO {
             data_buf[..50.min(data_buf.len())].escape_ascii()
         );
         Ok(PktLineReadResult::Packet(data_buf))
-    }
-
-    fn read_pkt_content(&mut self) -> Result<Vec<u8>, Error> {
-        let mut content = Vec::new();
-        while let Some(mut packet) = self.read_pkt_line()?.without_eof()? {
-            content.append(&mut packet);
-        }
-        Ok(content)
     }
 
     fn read_pkt_line_as_reader(&mut self) -> Result<PktContentReader<'_>, Error> {
@@ -1498,11 +1463,12 @@ impl PktLineProcess {
             return self.write_error_response(Error::PathnameIsMissing);
         };
 
-        let data = self.pkt_io.read_pkt_content()?;
+        let data = self.pkt_io.read_pkt_line_as_reader()?;
+        let data = write_blob(&self.repo.repo, data)?;
 
         let encrypted = match encrypt(
             &self.keypair,
-            &data,
+            data,
             pathname.as_slice(),
             &mut self.repo,
             encryption_policy,
@@ -1512,7 +1478,11 @@ impl PktLineProcess {
                 return self.write_error_response(e);
             }
         };
-        self.pkt_io.write_pkt_content(&encrypted)?;
+
+        let odb = self.repo.repo.odb()?;
+        let mut reader = oid_reader(&odb, encrypted)?;
+
+        self.pkt_io.write_pkt_content_with_reader(&mut reader)?;
         self.pkt_io.write_flush_pkt()?;
         Ok(())
     }
