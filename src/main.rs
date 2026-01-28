@@ -1398,6 +1398,11 @@ struct PktLineProcess {
     config: Rc<GitConfig>,
 }
 
+enum ProcessCommand {
+    Clean,
+    Smudge,
+}
+
 impl PktLineProcess {
     fn new() -> Result<Self, Error> {
         let repo = GitRepository::new()?;
@@ -1522,12 +1527,34 @@ impl PktLineProcess {
         Ok(pathname.as_slice())
     }
 
+    fn read_input(
+        &mut self,
+        args: &HashMap<Vec<u8>, Vec<u8>>,
+        command: ProcessCommand,
+    ) -> Result<Oid, Error> {
+        const BLOB_KEY: &[u8] = b"blob";
+
+        let mut reader = self.pkt_io.read_pkt_line_as_reader()?;
+
+        let oid = if let ProcessCommand::Smudge = command
+            && let Some(blob) = args.get(BLOB_KEY)
+            && let Ok(oid) = Oid::from_str(String::from_utf8_lossy(blob).as_ref())
+        {
+            // blob引数がある場合はそのOIDを利用する
+            // readerを消費して、pkt-lineの内容を破棄する
+            let mut buf = vec![0u8; 8192];
+            while reader.read(&mut buf)? > 0 {}
+            oid
+        } else {
+            write_blob(&self.repo.repo, reader)?
+        };
+        Ok(oid)
+    }
+
     fn command_clean(&mut self, encryption_policy: &mut EncryptionPolicy) -> Result<(), Error> {
         let args = self.parse_arguments()?;
         let pathname = Self::get_pathname(&args)?;
-
-        let reader = self.pkt_io.read_pkt_line_as_reader()?;
-        let data = write_blob(&self.repo.repo, reader)?;
+        let data = self.read_input(&args, ProcessCommand::Clean)?;
 
         let encrypted = match encrypt(
             &self.keypair,
@@ -1546,22 +1573,9 @@ impl PktLineProcess {
     }
 
     fn command_smudge(&mut self, encryption_policy: &mut EncryptionPolicy) -> Result<(), Error> {
-        const BLOB_KEY: &[u8] = b"blob";
         let args = self.parse_arguments()?;
         let pathname = Self::get_pathname(&args)?;
-
-        let mut reader = self.pkt_io.read_pkt_line_as_reader()?;
-        let data = if let Some(blob) = args.get(BLOB_KEY)
-            && let Ok(oid) = Oid::from_str(String::from_utf8_lossy(blob).as_ref())
-        {
-            // blob引数がある場合はそのOIDを利用する
-            // readerを消費して、pkt-lineの内容を破棄する
-            let mut buf = vec![0u8; 8192];
-            while reader.read(&mut buf)? > 0 {}
-            oid
-        } else {
-            write_blob(&self.repo.repo, reader)?
-        };
+        let data = self.read_input(&args, ProcessCommand::Smudge)?;
 
         let decrypted = match decrypt(
             &self.keypair,
