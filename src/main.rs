@@ -1539,14 +1539,25 @@ impl PktLineProcess {
 
     fn command_smudge(&mut self, encryption_policy: &mut EncryptionPolicy) -> Result<(), Error> {
         const PATHNAME_KEY: &[u8] = b"pathname";
+        const BLOB_KEY: &[u8] = b"blob";
         let args = self.parse_arguments()?;
 
         let Some(pathname) = args.get(PATHNAME_KEY) else {
             return self.write_error_response(Error::PathnameIsMissing);
         };
 
-        let data = self.pkt_io.read_pkt_line_as_reader()?;
-        let data = write_blob(&self.repo.repo, data)?;
+        let mut reader = self.pkt_io.read_pkt_line_as_reader()?;
+        let data = if let Some(blob) = args.get(BLOB_KEY)
+            && let Ok(oid) = Oid::from_str(String::from_utf8_lossy(blob).as_ref())
+        {
+            // blob引数がある場合はそのOIDを利用する
+            // readerを消費して、pkt-lineの内容を破棄する
+            let mut buf = vec![0u8; 8192];
+            while reader.read(&mut buf)? > 0 {}
+            oid
+        } else {
+            write_blob(&self.repo.repo, reader)?
+        };
 
         let decrypted = match decrypt(
             &self.keypair,
