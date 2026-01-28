@@ -1,4 +1,5 @@
 use std::{
+    cmp,
     collections::{HashMap, HashSet},
     env::current_dir,
     ffi::{OsStr, OsString},
@@ -483,12 +484,11 @@ fn smudge(path: &OsStr) -> Result<(), Error> {
 
     let mut encryption_policy = EncryptionPolicy::new(Rc::new(config));
 
-    let mut data = Vec::new();
-    std::io::stdin().lock().read_to_end(&mut data)?;
+    let blob_oid = write_blob(&repo.repo, &mut std::io::stdin().lock())?;
 
     let decrypted = decrypt(
         &keypair,
-        &data,
+        blob_oid,
         &mut repo,
         path.as_encoded_bytes(),
         &mut encryption_policy,
@@ -503,6 +503,20 @@ fn smudge(path: &OsStr) -> Result<(), Error> {
 
 fn oid_reader(odb: &Odb, oid: Oid) -> Result<impl Read, git2::Error> {
     odb.reader(oid).map(|(r, _, _)| r)
+}
+
+struct DebugReader<R: Read>(R);
+
+impl<R: Read> Read for DebugReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.0.read(buf)
+    }
+}
+
+impl<R: Read> std::fmt::Debug for DebugReader<R> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "DebugReader<{}>", std::any::type_name::<R>())
+    }
 }
 
 fn parse_pgp_message<'a, R: BufRead + std::fmt::Debug + Send + 'a>(
@@ -763,13 +777,21 @@ fn decrypt_message(message: Message, key_pair: &KeyPair) -> Result<impl Read, Er
 
 fn decrypt(
     key_pair: &KeyPair,
-    data: &[u8],
+    data: Oid,
     repo: &mut GitRepository,
     path: &[u8],
     encryption_policy: &mut EncryptionPolicy,
 ) -> Result<Oid, Error> {
-    let oid = repo.repo.blob(data)?;
-    let message = match parse_pgp_message(BufReader::new(data)) {
+    // キャッシュ確認
+    if let Some(cached) = cache_oid_lookup(repo, CacheType::Decrypt, data)? {
+        // キャッシュヒット
+        return Ok(cached);
+    }
+
+    let odb = repo.repo.odb()?;
+    let reader = oid_reader(&odb, data)?;
+
+    let message = match parse_pgp_message(BufReader::new(DebugReader(reader))) {
         Ok(msg) => msg,
         Err(e) => {
             // パケットが不正 = 暗号化されていない場合はそのまま出力
@@ -782,24 +804,18 @@ fn decrypt(
             } else {
                 log::debug!("Not a valid PGP message ({:?}), outputting raw data", e);
             }
-            return Ok(oid);
+            return Ok(data);
         }
     };
     if !message.is_encrypted() {
         // 暗号化されていない場合はそのまま出力
         log::debug!("Message is not encrypted, outputting raw data");
-        return Ok(oid);
+        return Ok(data);
     }
     if !encryption_policy.is_encrypted_for_configured_key(&message)? {
         // 指定されたキーIDに一致する公開鍵で暗号化されていない場合はそのまま出力
         log::debug!("Message is not encrypted for the configured key, outputting raw data");
-        return Ok(oid);
-    }
-
-    // キャッシュ確認
-    if let Some(cached) = cache_oid_lookup(repo, CacheType::Decrypt, oid)? {
-        // キャッシュヒット
-        return Ok(cached);
+        return Ok(data);
     }
 
     let decrypted_bytes_reader = match decrypt_message(message, key_pair) {
@@ -807,7 +823,7 @@ fn decrypt(
         Err(Error::MissingKey) => {
             // 復号化キーが見つからない場合はそのまま出力
             log::debug!("Missing decryption key, outputting raw data");
-            return Ok(oid);
+            return Ok(data);
         }
         Err(e) => return Err(e),
     };
@@ -816,7 +832,7 @@ fn decrypt(
     let decrypt_obj_oid = write_blob(&repo.repo, decrypted_bytes_reader)?;
 
     log::debug!("Caching decrypted object");
-    cache_update(repo, decrypt_obj_oid, oid);
+    cache_update(repo, decrypt_obj_oid, data);
 
     Ok(decrypt_obj_oid)
 }
@@ -841,11 +857,12 @@ fn textconv(path: &Path) -> Result<(), Error> {
 
     let mut encryption_policy = EncryptionPolicy::new(Rc::new(config));
 
-    let data = fs::read(path)?;
+    let mut file = fs::OpenOptions::new().read(true).open(path)?;
+    let blob_oid = write_blob(&repo.repo, &mut file)?;
 
     let decrypted = decrypt(
         &keypair,
-        &data,
+        blob_oid,
         &mut repo,
         &[], // textconvではパス情報を利用しない
         &mut encryption_policy,
@@ -975,6 +992,20 @@ fn pre_auto_gc() -> Result<(), Error> {
     Ok(())
 }
 
+/// ファイルポインタを先頭に戻して内容をコピーする
+/// writerはflushまで行う
+/// set_lenは行わないので、必要に応じて呼び出し元で行うこと
+fn copy_with_seek<R: Read + Seek, W: Write + Seek>(
+    reader: &mut R,
+    writer: &mut W,
+) -> Result<(), Error> {
+    reader.seek(io::SeekFrom::Start(0))?;
+    writer.seek(io::SeekFrom::Start(0))?;
+    io::copy(reader, writer)?;
+    writer.flush()?;
+    Ok(())
+}
+
 fn merge(
     base: &Path,
     local: &Path,
@@ -987,32 +1018,54 @@ fn merge(
     let keypair = KeyPair::try_from(&config)?;
     let mut encryption_policy = EncryptionPolicy::new(Rc::new(config));
 
-    let base_data = fs::read(base)?;
+    let mut base_file = fs::OpenOptions::new().read(true).open(base)?;
+    let base_crypted_oid = write_blob(&repo.repo, &mut base_file)?;
+
+    let mut local_file = fs::OpenOptions::new().write(true).read(true).open(local)?;
+    let local_crypted_oid = write_blob(&repo.repo, &mut local_file)?;
+
+    let mut remote_file = fs::OpenOptions::new().read(true).open(remote)?;
+    let remote_crypted_oid = write_blob(&repo.repo, &mut remote_file)?;
+
+    if local_crypted_oid == remote_crypted_oid {
+        // ローカルとリモートが同一ならマージ不要
+        log::debug!("Local and remote are identical, no merge needed");
+        return Ok(true);
+    }
+
+    if base_crypted_oid == remote_crypted_oid {
+        // ベースとリモートが同一ならローカルをそのまま採用
+        log::debug!("Base and remote are identical, adopting local");
+        return Ok(true);
+    }
+
+    if base_crypted_oid == local_crypted_oid {
+        // ベースとローカルが同一ならリモートをそのまま採用
+        log::debug!("Base and local are identical, adopting remote");
+        local_file.set_len(0)?; // ファイルを空にする
+        copy_with_seek(&mut remote_file, &mut local_file)?;
+        return Ok(true);
+    }
+
     let base_data = decrypt(
         &keypair,
-        &base_data,
+        base_crypted_oid,
         &mut repo,
         base.as_os_str().as_encoded_bytes(),
         &mut encryption_policy,
     )?;
 
-    let mut local_file = fs::OpenOptions::new().write(true).read(true).open(local)?;
-    let mut local_data = Vec::new();
-    local_file.read_to_end(&mut local_data)?;
     let local_data = decrypt(
         &keypair,
-        &local_data,
+        local_crypted_oid,
         &mut repo,
         local.as_os_str().as_encoded_bytes(),
         &mut encryption_policy,
     )?;
 
-    let mut remote_file = fs::OpenOptions::new().write(true).read(true).open(remote)?;
-    let mut remote_data = Vec::new();
-    remote_file.read_to_end(&mut remote_data)?;
     let remote_data = decrypt(
         &keypair,
-        &remote_data,
+        remote_crypted_oid,
         &mut repo,
         remote.as_os_str().as_encoded_bytes(),
         &mut encryption_policy,
@@ -1033,12 +1086,8 @@ fn merge(
     if base_data == local_data {
         // ベースとローカルが同一ならリモートをそのまま採用
         log::debug!("Base and local are identical, adopting remote");
-        local_file.seek(io::SeekFrom::Start(0))?; // ファイルポインタを先頭に戻す
         local_file.set_len(0)?; // ファイルを空にする
-
-        remote_file.seek(io::SeekFrom::Start(0))?; // ファイルポインタを先頭に戻す
-        std::io::copy(&mut remote_file, &mut local_file)?;
-        local_file.flush()?;
+        copy_with_seek(&mut remote_file, &mut local_file)?;
         return Ok(true);
     }
 
@@ -1281,8 +1330,63 @@ impl PktLineIO {
         Ok(content)
     }
 
+    fn read_pkt_line_as_reader(&mut self) -> Result<PktContentReader<'_>, Error> {
+        Ok(PktContentReader::new(self))
+    }
+
     fn read_pkt_line_text(&mut self) -> Result<PktLineTextResult, Error> {
         PktLineTextResult::try_from(self.read_pkt_line()?)
+    }
+}
+
+struct PktContentReader<'a> {
+    pkt_io: &'a mut PktLineIO,
+    finished: bool,
+    buffer: Vec<u8>,
+}
+
+impl<'a> PktContentReader<'a> {
+    fn new(pkt_io: &'a mut PktLineIO) -> Self {
+        PktContentReader {
+            pkt_io,
+            finished: false,
+            buffer: Vec::new(),
+        }
+    }
+
+    fn read_inner(&mut self, buf: &mut [u8]) -> Result<usize, Error> {
+        if self.finished {
+            return Ok(0); // EOF
+        }
+
+        while buf.len() > self.buffer.len() {
+            if let Some(mut packet) = self.pkt_io.read_pkt_line()?.without_eof()? {
+                self.buffer.append(&mut packet);
+            } else {
+                self.finished = true;
+                break;
+            }
+        }
+        let len = cmp::min(buf.len(), self.buffer.len());
+        if len == 0 {
+            return Ok(0); // EOF
+        }
+
+        let mut right = self.buffer.split_off(len);
+        core::mem::swap(&mut right, &mut self.buffer);
+        buf[..len].copy_from_slice(&right[..len]);
+
+        Ok(len)
+    }
+}
+
+impl Read for PktContentReader<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize, io::Error> {
+        match self.read_inner(buf) {
+            Ok(n) => Ok(n),
+            Err(Error::Io(e)) => Err(e),
+            Err(e) => Err(io::Error::new(io::ErrorKind::Other, e)),
+        }
     }
 }
 
@@ -1432,11 +1536,12 @@ impl PktLineProcess {
             return self.write_error_response(Error::PathnameIsMissing);
         };
 
-        let data = self.pkt_io.read_pkt_content()?;
+        let data = self.pkt_io.read_pkt_line_as_reader()?;
+        let data = write_blob(&self.repo.repo, data)?;
 
         let decrypted = match decrypt(
             &self.keypair,
-            &data,
+            data,
             &mut self.repo,
             &pathname,
             encryption_policy,
