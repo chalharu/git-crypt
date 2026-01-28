@@ -1481,21 +1481,10 @@ impl PktLineProcess {
     }
 
     fn command_clean(&mut self, encryption_policy: &mut EncryptionPolicy) -> Result<(), Error> {
-        let mut pathname = None;
-        const PATHNAME_PREFIX: &[u8] = b"pathname=";
-        while let Some(payload) = self.pkt_io.read_pkt_line()?.without_eof()? {
-            if payload.starts_with(PATHNAME_PREFIX) {
-                let mut data = payload.split_at(PATHNAME_PREFIX.len()).1.to_vec();
-                if data.ends_with(b"\n") {
-                    data.pop();
-                }
-                pathname = Some(data);
-            } else {
-                log::warn!("Unknown command arguments: {}", payload.escape_ascii());
-            }
-        }
+        const PATHNAME_KEY: &[u8] = b"pathname";
+        let args = self.parse_arguments()?;
 
-        let Some(pathname) = pathname else {
+        let Some(pathname) = args.get(PATHNAME_KEY) else {
             return self.write_error_response(Error::PathnameIsMissing);
         };
 
@@ -1523,22 +1512,36 @@ impl PktLineProcess {
         Ok(())
     }
 
-    fn command_smudge(&mut self, encryption_policy: &mut EncryptionPolicy) -> Result<(), Error> {
-        let mut pathname = None;
-        const PATHNAME_PREFIX: &[u8] = b"pathname=";
+    fn parse_arguments(&mut self) -> Result<HashMap<Vec<u8>, Vec<u8>>, Error> {
+        let mut args = HashMap::new();
+
         while let Some(payload) = self.pkt_io.read_pkt_line()?.without_eof()? {
-            if payload.starts_with(PATHNAME_PREFIX) {
-                let mut data = payload.split_at(PATHNAME_PREFIX.len()).1.to_vec();
-                if data.ends_with(b"\n") {
-                    data.pop();
-                }
-                pathname = Some(data);
-            } else {
-                log::warn!("Unknown command arguments: {}", payload.escape_ascii());
+            let mut parts = payload.splitn(2, |p| *p == b'=');
+            let Some(key) = parts.next() else {
+                // 空のペイロード
+                log::warn!("Invalid argument format (payload is empty)");
+                continue;
+            };
+            let Some(mut value) = parts.next().map(|v| v.to_vec()) else {
+                log::warn!("Invalid argument format: {}", payload.escape_ascii());
+                continue;
+            };
+            if value.last() == Some(&b'\n') {
+                value.pop();
+            }
+            if args.insert(key.to_vec(), value).is_some() {
+                log::warn!("Duplicate argument key: {}", key.escape_ascii());
             }
         }
 
-        let Some(pathname) = pathname else {
+        Ok(args)
+    }
+
+    fn command_smudge(&mut self, encryption_policy: &mut EncryptionPolicy) -> Result<(), Error> {
+        const PATHNAME_KEY: &[u8] = b"pathname";
+        let args = self.parse_arguments()?;
+
+        let Some(pathname) = args.get(PATHNAME_KEY) else {
             return self.write_error_response(Error::PathnameIsMissing);
         };
 
@@ -1549,7 +1552,7 @@ impl PktLineProcess {
             &self.keypair,
             data,
             &mut self.repo,
-            &pathname,
+            pathname,
             encryption_policy,
         ) {
             Ok(dec) => dec,
