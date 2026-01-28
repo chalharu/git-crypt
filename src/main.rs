@@ -1480,38 +1480,6 @@ impl PktLineProcess {
         Ok(())
     }
 
-    fn command_clean(&mut self, encryption_policy: &mut EncryptionPolicy) -> Result<(), Error> {
-        const PATHNAME_KEY: &[u8] = b"pathname";
-        let args = self.parse_arguments()?;
-
-        let Some(pathname) = args.get(PATHNAME_KEY) else {
-            return self.write_error_response(Error::PathnameIsMissing);
-        };
-
-        let data = self.pkt_io.read_pkt_line_as_reader()?;
-        let data = write_blob(&self.repo.repo, data)?;
-
-        let encrypted = match encrypt(
-            &self.keypair,
-            data,
-            pathname.as_slice(),
-            &mut self.repo,
-            encryption_policy,
-        ) {
-            Ok(enc) => enc,
-            Err(e) => {
-                return self.write_error_response(e);
-            }
-        };
-
-        let odb = self.repo.repo.odb()?;
-        let mut reader = oid_reader(&odb, encrypted)?;
-
-        self.pkt_io.write_pkt_content_with_reader(&mut reader)?;
-        self.pkt_io.write_flush_pkt()?;
-        Ok(())
-    }
-
     fn parse_arguments(&mut self) -> Result<HashMap<Vec<u8>, Vec<u8>>, Error> {
         let mut args = HashMap::new();
 
@@ -1535,6 +1503,42 @@ impl PktLineProcess {
         }
 
         Ok(args)
+    }
+
+    fn output_content_with_oid(&mut self, oid: Oid) -> Result<(), Error> {
+        let odb = self.repo.repo.odb()?;
+        let mut reader = oid_reader(&odb, oid)?;
+
+        self.pkt_io.write_pkt_content_with_reader(&mut reader)?;
+        self.pkt_io.write_flush_pkt()?;
+        Ok(())
+    }
+
+    fn command_clean(&mut self, encryption_policy: &mut EncryptionPolicy) -> Result<(), Error> {
+        const PATHNAME_KEY: &[u8] = b"pathname";
+        let args = self.parse_arguments()?;
+
+        let Some(pathname) = args.get(PATHNAME_KEY) else {
+            return self.write_error_response(Error::PathnameIsMissing);
+        };
+
+        let reader = self.pkt_io.read_pkt_line_as_reader()?;
+        let data = write_blob(&self.repo.repo, reader)?;
+
+        let encrypted = match encrypt(
+            &self.keypair,
+            data,
+            pathname.as_slice(),
+            &mut self.repo,
+            encryption_policy,
+        ) {
+            Ok(enc) => enc,
+            Err(e) => {
+                return self.write_error_response(e);
+            }
+        };
+
+        self.output_content_with_oid(encrypted)
     }
 
     fn command_smudge(&mut self, encryption_policy: &mut EncryptionPolicy) -> Result<(), Error> {
@@ -1572,12 +1576,7 @@ impl PktLineProcess {
             }
         };
 
-        let odb = self.repo.repo.odb()?;
-        let mut reader = oid_reader(&odb, decrypted)?;
-
-        self.pkt_io.write_pkt_content_with_reader(&mut reader)?;
-        self.pkt_io.write_flush_pkt()?;
-        Ok(())
+        self.output_content_with_oid(decrypted)
     }
 
     fn command(&mut self) -> Result<(), Error> {
