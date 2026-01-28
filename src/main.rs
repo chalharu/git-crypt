@@ -12,7 +12,7 @@ use std::{
     vec,
 };
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use git2::{
     Delta, DiffOptions, MergeFileInput, MergeFileOptions, ObjectType, Odb, Oid, Repository,
     TreeWalkMode, TreeWalkResult,
@@ -30,8 +30,14 @@ use regex::bytes::Regex;
 #[derive(Parser, Clone, Debug)]
 struct Cli {
     /// デバッグトレース出力を有効化
-    #[arg(short, long)]
+    #[arg(short, long, conflicts_with_all = ["verbosity", "debug_all"])]
     debug: bool,
+    /// すべてのデバッグトレース出力を有効化
+    #[arg(long, conflicts_with_all = ["verbosity", "debug"])]
+    debug_all: bool,
+    /// ログの冗長性レベル (error, warn, debug, debug-all)
+    #[arg(short, long, conflicts_with_all = ["debug", "debug_all"])]
+    verbosity: Option<Verbosity>,
     #[command(subcommand)]
     command: Commands,
 }
@@ -80,6 +86,18 @@ pub enum Commands {
     PreAutoGc,
     /// git clean/smudgeのprocessコマンド
     Process,
+}
+
+#[derive(Clone, Debug, ValueEnum)]
+enum Verbosity {
+    #[value(aliases = ["0", "e", "err"])]
+    Error, // 0
+    #[value(aliases = ["1", "w", "warning"])]
+    Warn, // 1
+    #[value(aliases = ["2", "d"])]
+    Debug, // 2
+    #[value(aliases = ["3", "debug_all"])]
+    DebugAll, // 3
 }
 
 trait ToPath<'a> {
@@ -172,23 +190,41 @@ fn normalize_path<P: AsRef<Path>>(path: P) -> Result<PathBuf, Error> {
 fn main() {
     let cli = Cli::parse();
 
-    if cli.debug {
-        if let Err(e) = stderrlog::new()
+    let verbosity = if let Some(v) = cli.verbosity {
+        v
+    } else if cli.debug {
+        Verbosity::Debug
+    } else if cli.debug_all {
+        Verbosity::DebugAll
+    } else {
+        Verbosity::Error
+    };
+
+    let mut logger = stderrlog::new();
+
+    if let Err(e) = match verbosity {
+        Verbosity::Error => logger
+            .module(module_path!())
+            .verbosity(0)
+            .timestamp(stderrlog::Timestamp::Off)
+            .show_level(false),
+        Verbosity::Warn => logger
+            .module(module_path!())
+            .verbosity(1)
+            .timestamp(stderrlog::Timestamp::Second)
+            .show_level(true),
+        Verbosity::Debug => logger
+            .module(module_path!())
+            .verbosity(3)
+            .timestamp(stderrlog::Timestamp::Second)
+            .show_level(true),
+        Verbosity::DebugAll => logger
             .show_module_names(true)
             .verbosity(3)
             .timestamp(stderrlog::Timestamp::Second)
-            .init()
-        {
-            eprintln!("Failed to initialize logging: {}", e);
-            std::process::exit(1);
-        }
-        log::debug!("Debug mode is enabled");
-    } else if let Err(e) = stderrlog::new()
-        .module(module_path!())
-        .verbosity(0)
-        .timestamp(stderrlog::Timestamp::Off)
-        .show_level(false)
-        .init()
+            .show_level(true),
+    }
+    .init()
     {
         eprintln!("Failed to initialize logging: {}", e);
         std::process::exit(1);
