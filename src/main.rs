@@ -665,9 +665,9 @@ fn encrypt<'a, T: 'a + ToPath<'a>>(
                     log::debug!("Decrypted data successfully");
                     // インデックスの内容を復号化できた場合、復号化した内容と同一ならば再暗号化せずにそのまま出力
                     let reader = oid_reader(&odb, oid)?;
-                    if decrypted_bytes_reader
-                        .bytes()
-                        .try_eq_fn(reader.bytes(), |x, y| {
+                    if BufReader::new(decrypted_bytes_reader).bytes().try_eq_fn(
+                        BufReader::new(reader).bytes(),
+                        |x, y| {
                             if let Some(x) = x
                                 && let Some(y) = y
                             {
@@ -676,8 +676,8 @@ fn encrypt<'a, T: 'a + ToPath<'a>>(
                             } else {
                                 Ok(false)
                             }
-                        })?
-                    {
+                        },
+                    )? {
                         log::debug!(
                             "Decrypted data matches the input data, using cached encrypted object"
                         );
@@ -1350,7 +1350,7 @@ impl Read for PktContentReader<'_> {
         match self.read_inner(buf) {
             Ok(n) => Ok(n),
             Err(Error::Io(e)) => Err(e),
-            Err(e) => Err(io::Error::new(io::ErrorKind::Other, e)),
+            Err(e) => Err(io::Error::other(e)),
         }
     }
 }
