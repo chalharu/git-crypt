@@ -3,7 +3,7 @@ use std::{
     collections::{HashMap, HashSet},
     env::current_dir,
     ffi::{OsStr, OsString},
-    fs,
+    fs::{self, File},
     io::{
         self, BufRead, BufReader, BufWriter, ErrorKind, Read, Seek, StdinLock, StdoutLock, Write,
     },
@@ -170,7 +170,7 @@ fn convert_wsl_path_to_windows(path: &Path) -> Option<PathBuf> {
     None
 }
 
-fn normalize_path<P: AsRef<Path>>(path: P) -> Result<PathBuf, Error> {
+fn try_normalize_path<P: AsRef<Path>>(path: P) -> Result<PathBuf, Error> {
     // Windows環境では、WSL上のGitから呼び出された場合に、パスがUnix形式になるため、
     // Windowsのパスに変換する必要がある。
     #[cfg(target_os = "windows")]
@@ -185,6 +185,14 @@ fn normalize_path<P: AsRef<Path>>(path: P) -> Result<PathBuf, Error> {
     }
     #[cfg(not(target_os = "windows"))]
     Ok(path.as_ref().to_path_buf())
+}
+
+fn normalize_path<P: AsRef<Path>>(path: P) -> PathBuf {
+    let Ok(path) = try_normalize_path(&path) else {
+        log::debug!("WSL path conversion failed");
+        std::process::exit(1);
+    };
+    path
 }
 
 fn main() {
@@ -245,12 +253,7 @@ fn main() {
         }
         Commands::Textconv { file_path } => {
             log::debug!("Textconv for file: {:?}", file_path);
-            let Ok(file_path) = normalize_path(&file_path) else {
-                log::debug!("WSL path conversion failed");
-                std::process::exit(1);
-            };
-
-            if let Err(e) = textconv(&file_path) {
+            if let Err(e) = textconv(&normalize_path(file_path)) {
                 log::error!("Error during textconv: {}", e);
                 std::process::exit(1);
             }
@@ -262,20 +265,13 @@ fn main() {
             marker_size,
             file_path,
         } => {
-            // WSLパスの変換
-            let Ok(base) = normalize_path(&base) else {
-                log::debug!("WSL path conversion failed");
-                std::process::exit(1);
-            };
-            let Ok(local) = normalize_path(&local) else {
-                log::debug!("WSL path conversion failed");
-                std::process::exit(1);
-            };
-            let Ok(remote) = normalize_path(&remote) else {
-                log::debug!("WSL path conversion failed");
-                std::process::exit(1);
-            };
-            match merge(&base, &local, &remote, marker_size.parse().ok(), &file_path) {
+            match merge(
+                &normalize_path(base),
+                &normalize_path(local),
+                &normalize_path(remote),
+                marker_size.parse().ok(),
+                &file_path,
+            ) {
                 Ok(is_automergeable) => std::process::exit(if is_automergeable { 0 } else { 1 }),
                 Err(e) => {
                     log::error!("Error during merge: {}", e);
@@ -1036,6 +1032,36 @@ fn copy_with_seek<R: Read + Seek, W: Write + Seek>(
     Ok(())
 }
 
+fn resolve_trivial_merge<T: Eq>(
+    local: T,
+    base: T,
+    remote: T,
+    local_file: &mut File,
+    remote_file: &mut File,
+) -> Result<bool, Error> {
+    if local == remote {
+        // ローカルとリモートが同一ならマージ不要
+        log::debug!("Local and remote are identical, no merge needed");
+        return Ok(true);
+    }
+
+    if base == remote {
+        // ベースとリモートが同一ならローカルをそのまま採用
+        log::debug!("Base and remote are identical, adopting local");
+        return Ok(true);
+    }
+
+    if base == local {
+        // ベースとローカルが同一ならリモートをそのまま採用
+        log::debug!("Base and local are identical, adopting remote");
+        local_file.set_len(0)?; // ファイルを空にする
+        copy_with_seek(remote_file, local_file)?;
+        return Ok(true);
+    }
+
+    Ok(false)
+}
+
 fn merge(
     base: &Path,
     local: &Path,
@@ -1054,23 +1080,13 @@ fn merge(
     let mut remote_file = fs::OpenOptions::new().read(true).open(remote)?;
     let remote_crypted_oid = context.repo.write_blob(&mut remote_file)?;
 
-    if local_crypted_oid == remote_crypted_oid {
-        // ローカルとリモートが同一ならマージ不要
-        log::debug!("Local and remote are identical, no merge needed");
-        return Ok(true);
-    }
-
-    if base_crypted_oid == remote_crypted_oid {
-        // ベースとリモートが同一ならローカルをそのまま採用
-        log::debug!("Base and remote are identical, adopting local");
-        return Ok(true);
-    }
-
-    if base_crypted_oid == local_crypted_oid {
-        // ベースとローカルが同一ならリモートをそのまま採用
-        log::debug!("Base and local are identical, adopting remote");
-        local_file.set_len(0)?; // ファイルを空にする
-        copy_with_seek(&mut remote_file, &mut local_file)?;
+    if resolve_trivial_merge(
+        local_crypted_oid,
+        base_crypted_oid,
+        remote_crypted_oid,
+        &mut local_file,
+        &mut remote_file,
+    )? {
         return Ok(true);
     }
 
@@ -1092,23 +1108,13 @@ fn merge(
         remote.as_os_str().as_encoded_bytes(),
     )?;
 
-    if local_data == remote_data {
-        // ローカルとリモートが同一ならマージ不要
-        log::debug!("Local and remote are identical, no merge needed");
-        return Ok(true);
-    }
-
-    if base_data == remote_data {
-        // ベースとリモートが同一ならローカルをそのまま採用
-        log::debug!("Base and remote are identical, adopting local");
-        return Ok(true);
-    }
-
-    if base_data == local_data {
-        // ベースとローカルが同一ならリモートをそのまま採用
-        log::debug!("Base and local are identical, adopting remote");
-        local_file.set_len(0)?; // ファイルを空にする
-        copy_with_seek(&mut remote_file, &mut local_file)?;
+    if resolve_trivial_merge(
+        local_data,
+        base_data,
+        remote_data,
+        &mut local_file,
+        &mut remote_file,
+    )? {
         return Ok(true);
     }
 
