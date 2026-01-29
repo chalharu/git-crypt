@@ -544,15 +544,27 @@ impl Context {
             encryption_policy,
         })
     }
+
+    fn decrypt_and_output<W: Write>(
+        &mut self,
+        oid: Oid,
+        path: &[u8],
+        writer: &mut W,
+    ) -> Result<(), Error> {
+        let decrypted = decrypt(self, oid, path)?;
+        self.repo.copy_oid_to_writer(decrypted, writer)?;
+        Ok(())
+    }
 }
 
 fn smudge(path: &OsStr) -> Result<(), Error> {
     let mut context = Context::new()?;
     let blob_oid = context.repo.write_blob(&mut std::io::stdin().lock())?;
-    let decrypted = decrypt(&mut context, blob_oid, path.as_encoded_bytes())?;
-    context
-        .repo
-        .copy_oid_to_writer(decrypted, &mut std::io::stdout().lock())?;
+    context.decrypt_and_output(
+        blob_oid,
+        path.as_encoded_bytes(),
+        &mut std::io::stdout().lock(),
+    )?;
     Ok(())
 }
 
@@ -884,15 +896,7 @@ fn textconv(path: &Path) -> Result<(), Error> {
     let mut file = fs::OpenOptions::new().read(true).open(path)?;
     let blob_oid = context.repo.write_blob(&mut file)?;
 
-    let decrypted = decrypt(
-        &mut context,
-        blob_oid,
-        &[], // textconvではパス情報を利用しない
-    )?;
-
-    context
-        .repo
-        .copy_oid_to_writer(decrypted, &mut std::io::stdout().lock())?;
+    context.decrypt_and_output(blob_oid, &[], &mut std::io::stdout().lock())?;
     Ok(())
 }
 
