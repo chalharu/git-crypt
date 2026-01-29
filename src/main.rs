@@ -513,8 +513,11 @@ impl GitRepository {
 
 fn clean(path: &OsStr) -> Result<(), Error> {
     let mut context = Context::new()?;
-    let blob_oid = context.repo.write_blob(&mut std::io::stdin().lock())?;
-    context.encrypt_and_output(blob_oid, path, &mut std::io::stdout().lock())?;
+    context.encrypt_io(
+        &mut std::io::stdin().lock(),
+        path,
+        &mut std::io::stdout().lock(),
+    )?;
     Ok(())
 }
 
@@ -537,24 +540,26 @@ impl Context {
         })
     }
 
-    fn decrypt_and_output<W: Write>(
+    fn decrypt_io<R: Read, W: Write>(
         &mut self,
-        oid: Oid,
+        reader: &mut R,
         path: &[u8],
         writer: &mut W,
     ) -> Result<(), Error> {
-        let decrypted = decrypt(self, oid, path)?;
+        let blob_oid = self.repo.write_blob(reader)?;
+        let decrypted = decrypt(self, blob_oid, path)?;
         self.repo.copy_oid_to_writer(decrypted, writer)?;
         Ok(())
     }
 
-    fn encrypt_and_output<'a, T: 'a + ToPath<'a>, W: Write>(
+    fn encrypt_io<'a, T: 'a + ToPath<'a>, R: Read, W: Write>(
         &mut self,
-        oid: Oid,
+        reader: &mut R,
         path: T,
         writer: &mut W,
     ) -> Result<(), Error> {
-        let encrypted = encrypt(self, oid, path)?;
+        let blob_oid = self.repo.write_blob(reader)?;
+        let encrypted = encrypt(self, blob_oid, path)?;
         self.repo.copy_oid_to_writer(encrypted, writer)?;
         Ok(())
     }
@@ -562,9 +567,8 @@ impl Context {
 
 fn smudge(path: &OsStr) -> Result<(), Error> {
     let mut context = Context::new()?;
-    let blob_oid = context.repo.write_blob(&mut std::io::stdin().lock())?;
-    context.decrypt_and_output(
-        blob_oid,
+    context.decrypt_io(
+        &mut std::io::stdin().lock(),
         path.as_encoded_bytes(),
         &mut std::io::stdout().lock(),
     )?;
@@ -896,10 +900,11 @@ fn decrypt(context: &mut Context, data: Oid, path: &[u8]) -> Result<Oid, Error> 
 fn textconv(path: &Path) -> Result<(), Error> {
     let mut context = Context::new()?;
 
-    let mut file = fs::OpenOptions::new().read(true).open(path)?;
-    let blob_oid = context.repo.write_blob(&mut file)?;
-
-    context.decrypt_and_output(blob_oid, &[], &mut std::io::stdout().lock())?;
+    context.decrypt_io(
+        &mut fs::OpenOptions::new().read(true).open(path)?,
+        &[],
+        &mut std::io::stdout().lock(),
+    )?;
     Ok(())
 }
 
@@ -1147,12 +1152,10 @@ fn merge(
     drop(local_data_blob);
     drop(remote_data_blob);
 
-    let blob_oid = context.repo.write_blob(result.content())?;
-
     local_file.seek(io::SeekFrom::Start(0))?; // ファイルポインタを先頭に戻す
     local_file.set_len(0)?; // ファイルを空にする
 
-    context.encrypt_and_output(blob_oid, file_path, &mut local_file)?;
+    context.encrypt_io(&mut result.content(), file_path, &mut local_file)?;
     local_file.flush()?;
 
     Ok(result.is_automergeable())
