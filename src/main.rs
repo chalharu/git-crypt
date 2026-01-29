@@ -730,7 +730,7 @@ fn encrypt<'a, T: 'a + ToPath<'a>>(context: &mut Context, oid: Oid, path: T) -> 
     {
         log::debug!("Found index entry for path: {:?}", path);
 
-        if let Ok(message) = parse_pgp_from_oid(&odb, oid) {
+        if let Ok(message) = parse_pgp_from_oid(&odb, index_entry.id) {
             log::debug!("Index entry is a valid PGP message, attempting decryption");
 
             match decrypt_message(message, &context.keypair) {
