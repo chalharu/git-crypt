@@ -494,6 +494,13 @@ impl GitRepository {
         let repo = git2::Repository::open(current_dir()?)?;
         Ok(GitRepository { repo })
     }
+
+    fn copy_oid_to_writer<W: Write>(&self, oid: Oid, writer: &mut W) -> Result<(), Error> {
+        let odb = self.repo.odb()?;
+        let mut reader = oid_reader(&odb, oid)?;
+        std::io::copy(&mut reader, writer)?;
+        Ok(())
+    }
 }
 
 fn clean(path: &OsStr) -> Result<(), Error> {
@@ -507,10 +514,7 @@ fn clean(path: &OsStr) -> Result<(), Error> {
     let mut encryption_policy = EncryptionPolicy::new(Rc::new(config));
     let encrypted = encrypt(&keypair, blob_oid, &mut repo, path, &mut encryption_policy)?;
 
-    let odb = repo.repo.odb()?;
-    let mut reader = oid_reader(&odb, encrypted)?;
-    std::io::copy(&mut reader, &mut std::io::stdout())?;
-
+    repo.copy_oid_to_writer(encrypted, &mut std::io::stdout().lock())?;
     Ok(())
 }
 
@@ -532,10 +536,7 @@ fn smudge(path: &OsStr) -> Result<(), Error> {
         &mut encryption_policy,
     )?;
 
-    let odb = repo.repo.odb()?;
-    let mut reader = oid_reader(&odb, decrypted)?;
-    std::io::copy(&mut reader, &mut std::io::stdout())?;
-
+    repo.copy_oid_to_writer(decrypted, &mut std::io::stdout().lock())?;
     Ok(())
 }
 
@@ -888,10 +889,7 @@ fn textconv(path: &Path) -> Result<(), Error> {
         &mut encryption_policy,
     )?;
 
-    let odb = repo.repo.odb()?;
-    let mut reader = oid_reader(&odb, decrypted)?;
-    std::io::copy(&mut reader, &mut std::io::stdout())?;
-
+    repo.copy_oid_to_writer(decrypted, &mut std::io::stdout().lock())?;
     Ok(())
 }
 
@@ -1152,9 +1150,7 @@ fn merge(
 
     local_file.seek(io::SeekFrom::Start(0))?; // ファイルポインタを先頭に戻す
     local_file.set_len(0)?; // ファイルを空にする
-    let odb = repo.repo.odb()?;
-    let mut reader = oid_reader(&odb, encrypted)?;
-    io::copy(&mut reader, &mut local_file)?;
+    repo.copy_oid_to_writer(encrypted, &mut local_file)?;
     local_file.flush()?;
 
     Ok(result.is_automergeable())
