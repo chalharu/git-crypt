@@ -575,7 +575,7 @@ fn smudge(path: &OsStr) -> Result<(), Error> {
     Ok(())
 }
 
-fn oid_reader(odb: &Odb, oid: Oid) -> Result<impl Read, git2::Error> {
+fn oid_reader<'a>(odb: &'a Odb<'a>, oid: Oid) -> Result<impl Read + 'a, git2::Error> {
     odb.reader(oid).map(|(r, _, _)| r)
 }
 
@@ -599,6 +599,11 @@ fn parse_pgp_message<'a, R: BufRead + std::fmt::Debug + Send + 'a>(
     // form_readerは、ArmoredとBinaryの両方に対応している
     let (message, _) = Message::from_reader(input)?;
     Ok(message)
+}
+
+fn parse_pgp_from_oid<'a>(odb: &'a Odb<'a>, oid: Oid) -> Result<Message<'a>, Error> {
+    let reader = oid_reader(odb, oid)?;
+    parse_pgp_message(BufReader::new(DebugReader(reader)))
 }
 
 #[derive(Clone, Copy)]
@@ -708,9 +713,8 @@ fn encrypt<'a, T: 'a + ToPath<'a>>(context: &mut Context, oid: Oid, path: T) -> 
     }
 
     let odb = context.repo.repo.odb()?;
-    let reader = oid_reader(&odb, oid)?;
 
-    if let Ok(message) = parse_pgp_message(BufReader::new(DebugReader(reader)))
+    if let Ok(message) = parse_pgp_from_oid(&odb, oid)
         && context
             .encryption_policy
             .is_encrypted_for_configured_key(&message)?
@@ -726,9 +730,7 @@ fn encrypt<'a, T: 'a + ToPath<'a>>(context: &mut Context, oid: Oid, path: T) -> 
     {
         log::debug!("Found index entry for path: {:?}", path);
 
-        if let Ok(blob) = oid_reader(&odb, index_entry.id)
-            && let Ok(message) = parse_pgp_message(BufReader::new(DebugReader(blob)))
-        {
+        if let Ok(message) = parse_pgp_from_oid(&odb, oid) {
             log::debug!("Index entry is a valid PGP message, attempting decryption");
 
             match decrypt_message(message, &context.keypair) {
@@ -845,9 +847,7 @@ fn decrypt(context: &mut Context, data: Oid, path: &[u8]) -> Result<Oid, Error> 
     }
 
     let odb = context.repo.repo.odb()?;
-    let reader = oid_reader(&odb, data)?;
-
-    let message = match parse_pgp_message(BufReader::new(DebugReader(reader))) {
+    let message = match parse_pgp_from_oid(&odb, data) {
         Ok(msg) => msg,
         Err(e) => {
             // パケットが不正 = 暗号化されていない場合はそのまま出力
@@ -940,9 +940,7 @@ fn pre_commit() -> Result<(), Error> {
             && encryption_policy
                 .should_encrypt_file_path(file_path.as_os_str().as_encoded_bytes())?
         {
-            let (reader, _, _) = odb.reader(oid)?;
-
-            if let Ok(message) = parse_pgp_message(BufReader::new(DebugReader(reader)))
+            if let Ok(message) = parse_pgp_from_oid(&odb, oid)
                 && encryption_policy.is_encrypted_for_configured_key(&message)?
             {
                 continue; // 暗号化されているので次へ
