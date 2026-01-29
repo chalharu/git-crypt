@@ -518,11 +518,7 @@ impl GitRepository {
 fn clean(path: &OsStr) -> Result<(), Error> {
     let mut context = Context::new()?;
     let blob_oid = context.repo.write_blob(&mut std::io::stdin().lock())?;
-    let encrypted = encrypt(&mut context, blob_oid, path)?;
-
-    context
-        .repo
-        .copy_oid_to_writer(encrypted, &mut std::io::stdout().lock())?;
+    context.encrypt_and_output(blob_oid, path, &mut std::io::stdout().lock())?;
     Ok(())
 }
 
@@ -553,6 +549,17 @@ impl Context {
     ) -> Result<(), Error> {
         let decrypted = decrypt(self, oid, path)?;
         self.repo.copy_oid_to_writer(decrypted, writer)?;
+        Ok(())
+    }
+
+    fn encrypt_and_output<'a, T: 'a + ToPath<'a>, W: Write>(
+        &mut self,
+        oid: Oid,
+        path: T,
+        writer: &mut W,
+    ) -> Result<(), Error> {
+        let encrypted = encrypt(self, oid, path)?;
+        self.repo.copy_oid_to_writer(encrypted, writer)?;
         Ok(())
     }
 }
@@ -1138,13 +1145,10 @@ fn merge(
 
     let blob_oid = context.repo.write_blob(result.content())?;
 
-    let encrypted = encrypt(&mut context, blob_oid, file_path)?;
-
     local_file.seek(io::SeekFrom::Start(0))?; // ファイルポインタを先頭に戻す
     local_file.set_len(0)?; // ファイルを空にする
-    context
-        .repo
-        .copy_oid_to_writer(encrypted, &mut local_file)?;
+
+    context.encrypt_and_output(blob_oid, file_path, &mut local_file)?;
     local_file.flush()?;
 
     Ok(result.is_automergeable())
