@@ -14,8 +14,8 @@ use std::{
 
 use clap::{Parser, Subcommand, ValueEnum};
 use git2::{
-    Delta, DiffOptions, MergeFileInput, MergeFileOptions, ObjectType, Odb, Oid, Repository,
-    TreeWalkMode, TreeWalkResult,
+    Delta, DiffOptions, MergeFileInput, MergeFileOptions, ObjectType, Odb, Oid, TreeWalkMode,
+    TreeWalkResult,
 };
 use pgp::{
     composed::{
@@ -501,6 +501,18 @@ impl GitRepository {
         std::io::copy(&mut reader, writer)?;
         Ok(())
     }
+
+    fn write_blob<R: Read>(&self, reader: R) -> Result<Oid, Error> {
+        let writer = self.repo.blob_writer(None)?;
+        let mut buf_writer = BufWriter::new(writer);
+        let mut buf_reader = BufReader::new(reader);
+        io::copy(&mut buf_reader, &mut buf_writer)?;
+        let oid = match buf_writer.into_inner() {
+            Ok(w) => w.commit()?,
+            Err(e) => return Err(Error::Io(e.into_error())),
+        };
+        Ok(oid)
+    }
 }
 
 fn clean(path: &OsStr) -> Result<(), Error> {
@@ -509,7 +521,7 @@ fn clean(path: &OsStr) -> Result<(), Error> {
     let config = GitConfig::load(&repo)?;
     let keypair = KeyPair::try_from(&config)?;
 
-    let blob_oid = write_blob(&repo.repo, &mut std::io::stdin().lock())?;
+    let blob_oid = repo.write_blob(&mut std::io::stdin().lock())?;
 
     let mut encryption_policy = EncryptionPolicy::new(Rc::new(config));
     let encrypted = encrypt(&keypair, blob_oid, &mut repo, path, &mut encryption_policy)?;
@@ -526,7 +538,7 @@ fn smudge(path: &OsStr) -> Result<(), Error> {
 
     let mut encryption_policy = EncryptionPolicy::new(Rc::new(config));
 
-    let blob_oid = write_blob(&repo.repo, &mut std::io::stdin().lock())?;
+    let blob_oid = repo.write_blob(&mut std::io::stdin().lock())?;
 
     let decrypted = decrypt(
         &keypair,
@@ -850,24 +862,12 @@ fn decrypt(
     };
 
     // キャッシュ化
-    let decrypt_obj_oid = write_blob(&repo.repo, decrypted_bytes_reader)?;
+    let decrypt_obj_oid = repo.write_blob(decrypted_bytes_reader)?;
 
     log::debug!("Caching decrypted object");
     cache_update(repo, decrypt_obj_oid, data);
 
     Ok(decrypt_obj_oid)
-}
-
-fn write_blob<R: Read>(repo: &Repository, reader: R) -> Result<Oid, Error> {
-    let writer = repo.blob_writer(None)?;
-    let mut buf_writer = BufWriter::new(writer);
-    let mut buf_reader = BufReader::new(reader);
-    io::copy(&mut buf_reader, &mut buf_writer)?;
-    let oid = match buf_writer.into_inner() {
-        Ok(w) => w.commit()?,
-        Err(e) => return Err(Error::Io(e.into_error())),
-    };
-    Ok(oid)
 }
 
 fn textconv(path: &Path) -> Result<(), Error> {
@@ -879,7 +879,7 @@ fn textconv(path: &Path) -> Result<(), Error> {
     let mut encryption_policy = EncryptionPolicy::new(Rc::new(config));
 
     let mut file = fs::OpenOptions::new().read(true).open(path)?;
-    let blob_oid = write_blob(&repo.repo, &mut file)?;
+    let blob_oid = repo.write_blob(&mut file)?;
 
     let decrypted = decrypt(
         &keypair,
@@ -1037,13 +1037,13 @@ fn merge(
     let mut encryption_policy = EncryptionPolicy::new(Rc::new(config));
 
     let mut base_file = fs::OpenOptions::new().read(true).open(base)?;
-    let base_crypted_oid = write_blob(&repo.repo, &mut base_file)?;
+    let base_crypted_oid = repo.write_blob(&mut base_file)?;
 
     let mut local_file = fs::OpenOptions::new().write(true).read(true).open(local)?;
-    let local_crypted_oid = write_blob(&repo.repo, &mut local_file)?;
+    let local_crypted_oid = repo.write_blob(&mut local_file)?;
 
     let mut remote_file = fs::OpenOptions::new().read(true).open(remote)?;
-    let remote_crypted_oid = write_blob(&repo.repo, &mut remote_file)?;
+    let remote_crypted_oid = repo.write_blob(&mut remote_file)?;
 
     if local_crypted_oid == remote_crypted_oid {
         // ローカルとリモートが同一ならマージ不要
@@ -1138,7 +1138,7 @@ fn merge(
     drop(local_data_blob);
     drop(remote_data_blob);
 
-    let blob_oid = write_blob(&repo.repo, result.content())?;
+    let blob_oid = repo.write_blob(result.content())?;
 
     let encrypted = encrypt(
         &keypair,
@@ -1543,7 +1543,7 @@ impl PktLineProcess {
             while reader.read(&mut buf)? > 0 {}
             oid
         } else {
-            write_blob(&self.repo.repo, reader)?
+            self.repo.write_blob(reader)?
         };
         Ok(oid)
     }
