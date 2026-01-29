@@ -516,39 +516,43 @@ impl GitRepository {
 }
 
 fn clean(path: &OsStr) -> Result<(), Error> {
-    let mut repo = GitRepository::new()?;
+    let mut context = Context::new()?;
+    let blob_oid = context.repo.write_blob(&mut std::io::stdin().lock())?;
+    let encrypted = encrypt(&mut context, blob_oid, path)?;
 
-    let config = GitConfig::load(&repo)?;
-    let keypair = KeyPair::try_from(&config)?;
-
-    let blob_oid = repo.write_blob(&mut std::io::stdin().lock())?;
-
-    let mut encryption_policy = EncryptionPolicy::new(Rc::new(config));
-    let encrypted = encrypt(&keypair, blob_oid, &mut repo, path, &mut encryption_policy)?;
-
-    repo.copy_oid_to_writer(encrypted, &mut std::io::stdout().lock())?;
+    context
+        .repo
+        .copy_oid_to_writer(encrypted, &mut std::io::stdout().lock())?;
     Ok(())
 }
 
+struct Context {
+    repo: GitRepository,
+    keypair: KeyPair,
+    encryption_policy: EncryptionPolicy,
+}
+
+impl Context {
+    fn new() -> Result<Self, Error> {
+        let repo = GitRepository::new()?;
+        let config = GitConfig::load(&repo)?;
+        let keypair = KeyPair::try_from(&config)?;
+        let encryption_policy = EncryptionPolicy::new(Rc::new(config));
+        Ok(Context {
+            repo,
+            keypair,
+            encryption_policy,
+        })
+    }
+}
+
 fn smudge(path: &OsStr) -> Result<(), Error> {
-    let mut repo = GitRepository::new()?;
-
-    let config = GitConfig::load(&repo)?;
-    let keypair = KeyPair::try_from(&config)?;
-
-    let mut encryption_policy = EncryptionPolicy::new(Rc::new(config));
-
-    let blob_oid = repo.write_blob(&mut std::io::stdin().lock())?;
-
-    let decrypted = decrypt(
-        &keypair,
-        blob_oid,
-        &mut repo,
-        path.as_encoded_bytes(),
-        &mut encryption_policy,
-    )?;
-
-    repo.copy_oid_to_writer(decrypted, &mut std::io::stdout().lock())?;
+    let mut context = Context::new()?;
+    let blob_oid = context.repo.write_blob(&mut std::io::stdin().lock())?;
+    let decrypted = decrypt(&mut context, blob_oid, path.as_encoded_bytes())?;
+    context
+        .repo
+        .copy_oid_to_writer(decrypted, &mut std::io::stdout().lock())?;
     Ok(())
 }
 
@@ -669,29 +673,28 @@ trait IteratorExt: Iterator + Sized {
 }
 impl<I: Iterator> IteratorExt for I {}
 
-fn encrypt<'a, T: 'a + ToPath<'a>>(
-    key_pair: &KeyPair,
-    oid: Oid,
-    repo: &mut GitRepository,
-    path: T,
-    encryption_policy: &mut EncryptionPolicy,
-) -> Result<Oid, Error> {
-    if !encryption_policy.should_encrypt_file_path(path.as_bytes())? {
+fn encrypt<'a, T: 'a + ToPath<'a>>(context: &mut Context, oid: Oid, path: T) -> Result<Oid, Error> {
+    if !context
+        .encryption_policy
+        .should_encrypt_file_path(path.as_bytes())?
+    {
         // 暗号化対象外のファイルの場合はそのまま出力
         log::debug!("File is not subject to encryption, outputting raw data");
         return Ok(oid);
     }
 
-    if let Some(cached) = cache_oid_lookup(repo, CacheType::Encrypt, oid)? {
+    if let Some(cached) = cache_oid_lookup(&context.repo, CacheType::Encrypt, oid)? {
         // encrypt_refが存在する = このマシンで暗号化したことがある
         return Ok(cached);
     }
 
-    let odb = repo.repo.odb()?;
+    let odb = context.repo.repo.odb()?;
     let reader = oid_reader(&odb, oid)?;
 
     if let Ok(message) = parse_pgp_message(BufReader::new(DebugReader(reader)))
-        && encryption_policy.is_encrypted_for_configured_key(&message)?
+        && context
+            .encryption_policy
+            .is_encrypted_for_configured_key(&message)?
     {
         log::debug!("Data is already encrypted for the configured key, outputting raw data");
         // すでに指定されたキーIDに一致する公開鍵で暗号化されている場合、そのまま出力
@@ -700,7 +703,7 @@ fn encrypt<'a, T: 'a + ToPath<'a>>(
 
     // インデックスの内容を取得して復号化を試みる
     if let Some(path) = path.to_path()
-        && let Some(index_entry) = repo.repo.index()?.get_path(Path::new(path), 0)
+        && let Some(index_entry) = context.repo.repo.index()?.get_path(Path::new(path), 0)
     {
         log::debug!("Found index entry for path: {:?}", path);
 
@@ -709,7 +712,7 @@ fn encrypt<'a, T: 'a + ToPath<'a>>(
         {
             log::debug!("Index entry is a valid PGP message, attempting decryption");
 
-            match decrypt_message(message, key_pair) {
+            match decrypt_message(message, &context.keypair) {
                 Ok(decrypted_bytes_reader) => {
                     log::debug!("Decrypted data successfully");
                     // インデックスの内容を復号化できた場合、復号化した内容と同一ならば再暗号化せずにそのまま出力
@@ -730,7 +733,7 @@ fn encrypt<'a, T: 'a + ToPath<'a>>(
                         log::debug!(
                             "Decrypted data matches the input data, using cached encrypted object"
                         );
-                        cache_update(repo, oid, index_entry.id);
+                        cache_update(&context.repo, oid, index_entry.id);
                         return Ok(index_entry.id);
                     }
                 }
@@ -742,24 +745,31 @@ fn encrypt<'a, T: 'a + ToPath<'a>>(
     }
 
     // ファイルを暗号化して出力
-    let encryption_subkey = if let Some(key_id) = encryption_policy.configured_key_id_bytes()? {
-        // 指定されたキーIDに一致するサブキーを探す
-        key_pair.public_key.public_subkeys.iter().find(|subkey| {
-            subkey.is_encryption_key()
-                && subkey
-                    .as_unsigned()
-                    .key_id()
-                    .as_ref()
-                    .iter()
-                    .eq(key_id.iter())
-        })
-    } else {
-        key_pair
-            .public_key
-            .public_subkeys
-            .iter()
-            .find(|subkey| subkey.is_encryption_key())
-    };
+    let encryption_subkey =
+        if let Some(key_id) = context.encryption_policy.configured_key_id_bytes()? {
+            // 指定されたキーIDに一致するサブキーを探す
+            context
+                .keypair
+                .public_key
+                .public_subkeys
+                .iter()
+                .find(|subkey| {
+                    subkey.is_encryption_key()
+                        && subkey
+                            .as_unsigned()
+                            .key_id()
+                            .as_ref()
+                            .iter()
+                            .eq(key_id.iter())
+                })
+        } else {
+            context
+                .keypair
+                .public_key
+                .public_subkeys
+                .iter()
+                .find(|subkey| subkey.is_encryption_key())
+        };
     let encryption_subkey = match encryption_subkey {
         Some(key) => key,
         None => return Err(Error::InvalidEncryptionSubkey),
@@ -771,11 +781,11 @@ fn encrypt<'a, T: 'a + ToPath<'a>>(
     builder.compression(CompressionAlgorithm::ZLIB);
     builder.encrypt_to_key(rand::thread_rng(), &encryption_subkey)?;
 
-    let mut writer = repo.repo.blob_writer(None)?;
+    let mut writer = context.repo.repo.blob_writer(None)?;
     builder.to_armored_writer(rand::thread_rng(), ArmorOptions::default(), &mut writer)?;
     let encrypt_obj_oid = writer.commit()?;
 
-    cache_update(repo, oid, encrypt_obj_oid);
+    cache_update(&context.repo, oid, encrypt_obj_oid);
 
     Ok(encrypt_obj_oid)
 }
@@ -808,20 +818,14 @@ fn decrypt_message(message: Message, key_pair: &KeyPair) -> Result<impl Read, Er
     Ok(decompressed_data)
 }
 
-fn decrypt(
-    key_pair: &KeyPair,
-    data: Oid,
-    repo: &mut GitRepository,
-    path: &[u8],
-    encryption_policy: &mut EncryptionPolicy,
-) -> Result<Oid, Error> {
+fn decrypt(context: &mut Context, data: Oid, path: &[u8]) -> Result<Oid, Error> {
     // キャッシュ確認
-    if let Some(cached) = cache_oid_lookup(repo, CacheType::Decrypt, data)? {
+    if let Some(cached) = cache_oid_lookup(&context.repo, CacheType::Decrypt, data)? {
         // キャッシュヒット
         return Ok(cached);
     }
 
-    let odb = repo.repo.odb()?;
+    let odb = context.repo.repo.odb()?;
     let reader = oid_reader(&odb, data)?;
 
     let message = match parse_pgp_message(BufReader::new(DebugReader(reader))) {
@@ -829,7 +833,8 @@ fn decrypt(
         Err(e) => {
             // パケットが不正 = 暗号化されていない場合はそのまま出力
             // 本来は平文と破損を区別したいが、現状では区別できないためそのまま出力
-            if encryption_policy
+            if context
+                .encryption_policy
                 .should_encrypt_file_path(path)
                 .unwrap_or(false)
             {
@@ -845,13 +850,16 @@ fn decrypt(
         log::debug!("Message is not encrypted, outputting raw data");
         return Ok(data);
     }
-    if !encryption_policy.is_encrypted_for_configured_key(&message)? {
+    if !context
+        .encryption_policy
+        .is_encrypted_for_configured_key(&message)?
+    {
         // 指定されたキーIDに一致する公開鍵で暗号化されていない場合はそのまま出力
         log::debug!("Message is not encrypted for the configured key, outputting raw data");
         return Ok(data);
     }
 
-    let decrypted_bytes_reader = match decrypt_message(message, key_pair) {
+    let decrypted_bytes_reader = match decrypt_message(message, &context.keypair) {
         Ok(decrypted_bytes_reader) => decrypted_bytes_reader,
         Err(Error::MissingKey) => {
             // 復号化キーが見つからない場合はそのまま出力
@@ -862,34 +870,29 @@ fn decrypt(
     };
 
     // キャッシュ化
-    let decrypt_obj_oid = repo.write_blob(decrypted_bytes_reader)?;
+    let decrypt_obj_oid = context.repo.write_blob(decrypted_bytes_reader)?;
 
     log::debug!("Caching decrypted object");
-    cache_update(repo, decrypt_obj_oid, data);
+    cache_update(&context.repo, decrypt_obj_oid, data);
 
     Ok(decrypt_obj_oid)
 }
 
 fn textconv(path: &Path) -> Result<(), Error> {
-    let mut repo = GitRepository::new()?;
-
-    let config = GitConfig::load(&repo)?;
-    let keypair = KeyPair::try_from(&config)?;
-
-    let mut encryption_policy = EncryptionPolicy::new(Rc::new(config));
+    let mut context = Context::new()?;
 
     let mut file = fs::OpenOptions::new().read(true).open(path)?;
-    let blob_oid = repo.write_blob(&mut file)?;
+    let blob_oid = context.repo.write_blob(&mut file)?;
 
     let decrypted = decrypt(
-        &keypair,
+        &mut context,
         blob_oid,
-        &mut repo,
         &[], // textconvではパス情報を利用しない
-        &mut encryption_policy,
     )?;
 
-    repo.copy_oid_to_writer(decrypted, &mut std::io::stdout().lock())?;
+    context
+        .repo
+        .copy_oid_to_writer(decrypted, &mut std::io::stdout().lock())?;
     Ok(())
 }
 
@@ -1031,19 +1034,16 @@ fn merge(
     marker_size: Option<usize>,
     file_path: &OsStr,
 ) -> Result<bool, Error> {
-    let mut repo = GitRepository::new()?;
-    let config = GitConfig::load(&repo)?;
-    let keypair = KeyPair::try_from(&config)?;
-    let mut encryption_policy = EncryptionPolicy::new(Rc::new(config));
+    let mut context = Context::new()?;
 
     let mut base_file = fs::OpenOptions::new().read(true).open(base)?;
-    let base_crypted_oid = repo.write_blob(&mut base_file)?;
+    let base_crypted_oid = context.repo.write_blob(&mut base_file)?;
 
     let mut local_file = fs::OpenOptions::new().write(true).read(true).open(local)?;
-    let local_crypted_oid = repo.write_blob(&mut local_file)?;
+    let local_crypted_oid = context.repo.write_blob(&mut local_file)?;
 
     let mut remote_file = fs::OpenOptions::new().read(true).open(remote)?;
-    let remote_crypted_oid = repo.write_blob(&mut remote_file)?;
+    let remote_crypted_oid = context.repo.write_blob(&mut remote_file)?;
 
     if local_crypted_oid == remote_crypted_oid {
         // ローカルとリモートが同一ならマージ不要
@@ -1066,27 +1066,21 @@ fn merge(
     }
 
     let base_data = decrypt(
-        &keypair,
+        &mut context,
         base_crypted_oid,
-        &mut repo,
         base.as_os_str().as_encoded_bytes(),
-        &mut encryption_policy,
     )?;
 
     let local_data = decrypt(
-        &keypair,
+        &mut context,
         local_crypted_oid,
-        &mut repo,
         local.as_os_str().as_encoded_bytes(),
-        &mut encryption_policy,
     )?;
 
     let remote_data = decrypt(
-        &keypair,
+        &mut context,
         remote_crypted_oid,
-        &mut repo,
         remote.as_os_str().as_encoded_bytes(),
-        &mut encryption_policy,
     )?;
 
     if local_data == remote_data {
@@ -1110,17 +1104,17 @@ fn merge(
     }
 
     let mut base_obj = MergeFileInput::new();
-    let base_data_blob = repo.repo.find_blob(base_data)?;
+    let base_data_blob = context.repo.repo.find_blob(base_data)?;
     base_obj.content(base_data_blob.content());
     base_obj.path(base);
 
     let mut local_obj = MergeFileInput::new();
-    let local_data_blob = repo.repo.find_blob(local_data)?;
+    let local_data_blob = context.repo.repo.find_blob(local_data)?;
     local_obj.content(local_data_blob.content());
     local_obj.path(local);
 
     let mut remote_obj = MergeFileInput::new();
-    let remote_data_blob = repo.repo.find_blob(remote_data)?;
+    let remote_data_blob = context.repo.repo.find_blob(remote_data)?;
     remote_obj.content(remote_data_blob.content());
     remote_obj.path(remote);
 
@@ -1138,19 +1132,15 @@ fn merge(
     drop(local_data_blob);
     drop(remote_data_blob);
 
-    let blob_oid = repo.write_blob(result.content())?;
+    let blob_oid = context.repo.write_blob(result.content())?;
 
-    let encrypted = encrypt(
-        &keypair,
-        blob_oid,
-        &mut repo,
-        file_path,
-        &mut encryption_policy,
-    )?;
+    let encrypted = encrypt(&mut context, blob_oid, file_path)?;
 
     local_file.seek(io::SeekFrom::Start(0))?; // ファイルポインタを先頭に戻す
     local_file.set_len(0)?; // ファイルを空にする
-    repo.copy_oid_to_writer(encrypted, &mut local_file)?;
+    context
+        .repo
+        .copy_oid_to_writer(encrypted, &mut local_file)?;
     local_file.flush()?;
 
     Ok(result.is_automergeable())
@@ -1388,10 +1378,8 @@ impl Read for PktContentReader<'_> {
 }
 
 struct PktLineProcess {
+    context: Context,
     pkt_io: PktLineIO,
-    repo: GitRepository,
-    keypair: KeyPair,
-    config: Rc<GitConfig>,
 }
 
 #[derive(Clone, Copy)]
@@ -1402,15 +1390,9 @@ enum ProcessCommand {
 
 impl PktLineProcess {
     fn new() -> Result<Self, Error> {
-        let repo = GitRepository::new()?;
-        let config = GitConfig::load(&repo)?;
-        let keypair = KeyPair::try_from(&config)?;
-
         Ok(PktLineProcess {
             pkt_io: PktLineIO::new(),
-            repo,
-            keypair,
-            config: Rc::new(config),
+            context: Context::new()?,
         })
     }
 
@@ -1508,7 +1490,7 @@ impl PktLineProcess {
     }
 
     fn output_content_with_oid(&mut self, oid: Oid) -> Result<(), Error> {
-        let odb = self.repo.repo.odb()?;
+        let odb = self.context.repo.repo.odb()?;
         let mut reader = oid_reader(&odb, oid)?;
 
         self.pkt_io.write_pkt_content_with_reader(&mut reader)?;
@@ -1543,16 +1525,12 @@ impl PktLineProcess {
             while reader.read(&mut buf)? > 0 {}
             oid
         } else {
-            self.repo.write_blob(reader)?
+            self.context.repo.write_blob(reader)?
         };
         Ok(oid)
     }
 
-    fn command_clean_or_smudge(
-        &mut self,
-        encryption_policy: &mut EncryptionPolicy,
-        command: ProcessCommand,
-    ) -> Result<(), Error> {
+    fn command_clean_or_smudge(&mut self, command: ProcessCommand) -> Result<(), Error> {
         let args = self.parse_arguments()?;
         let pathname = Self::get_pathname(&args)?;
         let data = self.read_input(&args, command)?;
@@ -1562,13 +1540,7 @@ impl PktLineProcess {
             ProcessCommand::Smudge => decrypt,
         };
 
-        let result_oid = match f(
-            &self.keypair,
-            data,
-            &mut self.repo,
-            pathname,
-            encryption_policy,
-        ) {
+        let result_oid = match f(&mut self.context, data, pathname) {
             Ok(r) => r,
             Err(e) => {
                 return self.write_error_response(e);
@@ -1579,7 +1551,6 @@ impl PktLineProcess {
     }
 
     fn command(&mut self) -> Result<(), Error> {
-        let mut encryption_policy = EncryptionPolicy::new(self.config.clone());
         // EOFで終了するまでコマンドを処理
         while let Ok(payload) =
             PktLineTextResult::try_from(self.pkt_io.read_pkt_line()?)?.without_eof()
@@ -1590,11 +1561,11 @@ impl PktLineProcess {
             match payload.as_str() {
                 "command=clean" => {
                     log::debug!("Processing clean command");
-                    self.command_clean_or_smudge(&mut encryption_policy, ProcessCommand::Clean)?;
+                    self.command_clean_or_smudge(ProcessCommand::Clean)?;
                 }
                 "command=smudge" => {
                     log::debug!("Processing smudge command");
-                    self.command_clean_or_smudge(&mut encryption_policy, ProcessCommand::Smudge)?;
+                    self.command_clean_or_smudge(ProcessCommand::Smudge)?;
                 }
                 _ => {
                     log::warn!("Unknown command: {}", payload);
