@@ -2072,7 +2072,7 @@ fn setup(
             .filter(|v| !v.is_empty())
             .collect::<Vec<_>>();
         if buf.first() != Some(&b"*".as_slice())
-            || !special_files
+            && !special_files
                 .iter()
                 .any(|f| Some(&f.as_slice()) == buf.first())
         {
