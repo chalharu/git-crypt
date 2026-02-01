@@ -2071,7 +2071,7 @@ fn setup(
             .split(|&b| b.is_ascii_whitespace())
             .filter(|v| !v.is_empty())
             .collect::<Vec<_>>();
-        if buf.first() != Some(&b"*".as_slice()) || special_files.iter().any(|f| Some(&f.as_slice()) == buf.first()) {
+        if buf.first() != Some(&b"*".as_slice()) || !special_files.iter().any(|f| Some(&f.as_slice()) == buf.first()) {
             // `*` または 特殊ファイル以外のパス指定の場合はそのまま追加
             new_gitattributes.push(line_buf.to_vec());
             continue;
