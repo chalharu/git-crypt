@@ -1814,6 +1814,22 @@ fn validate_filter_name(
     )))
 }
 
+struct ConfigChange {
+    key: String,
+    old_value: Option<String>,
+    new_value: Option<String>,
+}
+
+struct SetupPlan {
+    gitconfig_changes: Vec<ConfigChange>,
+    gitattributes_old: Vec<u8>,
+    gitattributes_new: Vec<u8>,
+}
+
+fn build_setup_plan() -> Result<SetupPlan, Error> {
+    todo!()
+}
+
 /// 初期設定を行う
 /// public_key: 公開鍵ファイルパス, 未指定時に既存設定がない場合はエラー
 /// private_key: 秘密鍵ファイルパス, 未指定時に既存設定がない場合はエラー
