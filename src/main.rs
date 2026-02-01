@@ -7,15 +7,23 @@ use std::{
     io::{
         self, BufRead, BufReader, BufWriter, ErrorKind, Read, Seek, StdinLock, StdoutLock, Write,
     },
-    path::{Path, PathBuf},
+    os::unix::ffi::OsStrExt,
+    path::{self, Path, PathBuf},
     rc::Rc,
+    str::FromStr,
     vec,
 };
 
 use clap::{Parser, Subcommand, ValueEnum};
+use colored::{Color, Colorize};
 use git2::{
-    Delta, DiffOptions, MergeFileInput, MergeFileOptions, ObjectType, Odb, Oid, TreeWalkMode,
-    TreeWalkResult,
+    Config, Delta, DiffOptions, MergeFileInput, MergeFileOptions, ObjectType, Odb, Oid,
+    TreeWalkMode, TreeWalkResult,
+};
+use inquire::{
+    Confirm, CustomType, Select, Text, set_global_render_config,
+    ui::RenderConfig,
+    validator::{CustomTypeValidator, ErrorMessage, Validation},
 };
 use pgp::{
     composed::{
@@ -26,6 +34,7 @@ use pgp::{
     types::{CompressionAlgorithm, KeyDetails, PublicKeyTrait},
 };
 use regex::bytes::Regex;
+use similar::ChangeTag;
 
 #[derive(Parser, Clone, Debug)]
 struct Cli {
@@ -86,6 +95,34 @@ pub enum Commands {
     PreAutoGc,
     /// git clean/smudgeのprocessコマンド
     Process,
+    /// git-cryptの初期化コマンド
+    Setup {
+        /// 公開鍵ファイルパス, 未指定時に既存設定がない場合はエラー
+        #[arg(long, aliases = ["pubkey"])]
+        public_key: Option<PathBuf>,
+        /// 秘密鍵ファイルパス, 未指定時に既存設定がない場合はエラー
+        #[arg(long, aliases = ["privkey"])]
+        private_key: Option<PathBuf>,
+        /// 暗号化サブキーID, 公開鍵・秘密鍵ファイルに含まれない場合はエラー
+        /// 公開鍵内の最初の暗号化サブキーを使用する場合は指定不要
+        #[arg(long, aliases = ["keyid"])]
+        encryption_key_id: Option<String>,
+        /// 暗号化対象パス正規表現, 未指定時に既存設定がない場合はすべてのファイルを暗号化対象とする
+        #[arg(long, aliases = ["pathregex"])]
+        encryption_path_regex: Option<String>,
+        /// フィルタ名, 未指定時は"crypt"を使用
+        #[arg(long, aliases = ["filter"])]
+        filter_name: Option<String>,
+        /// 非対話実行
+        #[arg(long, short)]
+        yes: bool,
+        /// 設定を強制上書き
+        #[arg(long, short)]
+        force: bool,
+        /// Dry-run Mode
+        #[arg(long, aliases = ["dry"])]
+        dry_run: bool,
+    },
 }
 
 #[derive(Clone, Debug, ValueEnum)]
@@ -305,6 +342,30 @@ fn main() {
                 std::process::exit(1);
             }
         }
+        Commands::Setup {
+            public_key,
+            private_key,
+            encryption_key_id,
+            encryption_path_regex,
+            filter_name,
+            yes,
+            force,
+            dry_run,
+        } => {
+            if let Err(e) = setup(
+                public_key,
+                private_key,
+                encryption_key_id,
+                encryption_path_regex,
+                filter_name,
+                yes,
+                force,
+                dry_run,
+            ) {
+                log::error!("Setup failed: {}", e);
+                std::process::exit(1);
+            }
+        }
     }
 }
 
@@ -338,6 +399,14 @@ enum Error {
     InvalidPacketUtf8(#[from] std::string::FromUtf8Error),
     #[error("Missing decryption key")]
     MissingKey,
+    #[error("Invalid git repository")]
+    InvalidGitRepository,
+    #[error("Prompt error occurred: {0}")]
+    Prompt(#[from] inquire::error::InquireError),
+    #[error("Setup error occurred")]
+    Setup,
+    #[error("Path is outside of the repository")]
+    PathIsOutsideOfRepository,
 }
 
 #[derive(Debug)]
@@ -395,14 +464,28 @@ struct GitConfig {
 }
 
 impl GitConfig {
+    const CONFIG_SECTION: &'static str = "git-crypt";
+    const PUBLIC_KEY: &'static str = "public-key";
+    const PRIVATE_KEY: &'static str = "private-key";
+    const ENCRYPTION_PATH_REGEX: &'static str = "encryption-path-regex";
+    const ENCRYPTION_KEY_ID: &'static str = "encryption-key-id";
+
+    fn combine_section_key(key: &str) -> String {
+        format!("{}.{}", Self::CONFIG_SECTION, key)
+    }
+
     // gitの設定を読み込む関数
     fn load(repo: &GitRepository) -> Result<GitConfig, Error> {
         let config = repo.repo.config()?;
 
-        let public_key = config.get_string("git-crypt.public-key")?;
-        let private_key = config.get_string("git-crypt.private-key")?;
-        let encryption_path_regex = config.get_string("git-crypt.encryption-path-regex").ok();
-        let encryption_key_id = config.get_string("git-crypt.encryption-key-id").ok();
+        let public_key = config.get_string(&Self::combine_section_key(Self::PUBLIC_KEY))?;
+        let private_key = config.get_string(&Self::combine_section_key(Self::PRIVATE_KEY))?;
+        let encryption_path_regex = config
+            .get_string(&Self::combine_section_key(Self::ENCRYPTION_PATH_REGEX))
+            .ok();
+        let encryption_key_id = config
+            .get_string(&Self::combine_section_key(Self::ENCRYPTION_KEY_ID))
+            .ok();
 
         Ok(GitConfig {
             public_key,
@@ -1597,4 +1680,601 @@ impl PktLineProcess {
         self.command()?;
         Ok(())
     }
+}
+
+struct InquirePathBuf<'a>(CustomType<'a, PathBuf>);
+
+impl<'a> InquirePathBuf<'a> {
+    fn new(message: &'a str, default: Option<PathBuf>, render_config: RenderConfig<'a>) -> Self {
+        InquirePathBuf(CustomType {
+            message,
+            starting_input: None,
+            default,
+            placeholder: None,
+            help_message: None,
+            formatter: &|p| p.to_string_lossy().to_string(),
+            default_value_formatter: &|p| p.to_string_lossy().to_string(),
+            parser: &|i| PathBuf::from_str(i).map_err(|_| ()),
+            validators: CustomType::DEFAULT_VALIDATORS,
+            error_message: "Invalid input".into(),
+            render_config,
+        })
+    }
+
+    fn with_validator<V>(mut self, validator: V) -> Self
+    where
+        V: CustomTypeValidator<PathBuf> + 'static,
+    {
+        self.0.validators.push(Box::new(validator));
+        self
+    }
+
+    fn prompt(self) -> Result<PathBuf, Error> {
+        self.0.prompt().map_err(|_| Error::Setup)
+    }
+}
+
+fn validate_public_key(
+    p: &PathBuf,
+) -> Result<Validation, Box<dyn std::error::Error + Send + Sync + 'static>> {
+    if p.as_os_str().to_str().is_none() {
+        return Ok(Validation::Invalid(ErrorMessage::Custom(
+            "Public key path contains invalid UTF-8 characters".into(),
+        )));
+    }
+    // 鍵ファイルの存在確認と検証
+    if !p.exists() || !p.is_file() {
+        return Ok(Validation::Invalid(ErrorMessage::Custom(
+            "Public key file does not exist or is not a file".into(),
+        )));
+    }
+    let mut fs = File::options().read(true).open(p)?;
+    if fs.metadata()?.len() > 1024 * 1024 {
+        // 1MBを超えるファイルは拒否
+        // 普通はそんなに大きな公開鍵ファイルは存在しないはず
+        return Ok(Validation::Invalid(ErrorMessage::Custom(
+            "Public key file is too large (>1MB)".into(),
+        )));
+    }
+    let mut buf = Vec::new();
+    fs.read_to_end(&mut buf)?;
+    if let Err(e) = read_public_key(&buf) {
+        return Ok(Validation::Invalid(ErrorMessage::Custom(format!(
+            "Failed to read public key: {}",
+            e
+        ))));
+    }
+    Ok(Validation::Valid)
+}
+
+fn validate_private_key(
+    p: &PathBuf,
+) -> Result<Validation, Box<dyn std::error::Error + Send + Sync + 'static>> {
+    if p.as_os_str().to_str().is_none() {
+        return Ok(Validation::Invalid(ErrorMessage::Custom(
+            "Private key path contains invalid UTF-8 characters".into(),
+        )));
+    }
+    // 鍵ファイルの存在確認と検証
+    if !p.exists() || !p.is_file() {
+        return Ok(Validation::Invalid(ErrorMessage::Custom(
+            "Private key file does not exist or is not a file".into(),
+        )));
+    }
+    let mut fs = File::options().read(true).open(p)?;
+    if fs.metadata()?.len() > 1024 * 1024 {
+        // 1MBを超えるファイルは拒否
+        // 普通はそんなに大きな公開鍵ファイルは存在しないはず
+        return Ok(Validation::Invalid(ErrorMessage::Custom(
+            "Private key file is too large (>1MB)".into(),
+        )));
+    }
+    let mut buf = Vec::new();
+    fs.read_to_end(&mut buf)?;
+    if let Err(e) = read_secret_key(&buf) {
+        return Ok(Validation::Invalid(ErrorMessage::Custom(format!(
+            "Failed to read public key: {}",
+            e
+        ))));
+    }
+    Ok(Validation::Valid)
+}
+
+fn validate_encryption_path_regex(
+    r: &str,
+) -> Result<Validation, Box<dyn std::error::Error + Send + Sync + 'static>> {
+    match Regex::new(r) {
+        Ok(_) => Ok(Validation::Valid),
+        Err(e) => Ok(Validation::Invalid(ErrorMessage::Custom(format!(
+            "Invalid regex pattern: {}",
+            e
+        )))),
+    }
+}
+
+fn validate_filter_name(
+    n: &str,
+) -> Result<Validation, Box<dyn std::error::Error + Send + Sync + 'static>> {
+    if n.trim().is_empty() {
+        return Ok(Validation::Invalid(ErrorMessage::Custom(
+            "Filter name cannot be empty".into(),
+        )));
+    }
+    // 英数字、ハイフン、アンダースコアのみを許可
+    // 先頭・末尾にハイフン・アンダースコアは許可しない
+    if n.is_ascii()
+        && n.bytes().enumerate().all(|(i, b)| {
+            b.is_ascii_alphanumeric() || (b == b'-' || b == b'_') && i != 0 && i != n.len() - 1
+        })
+    {
+        return Ok(Validation::Valid);
+    }
+    Ok(Validation::Invalid(ErrorMessage::Custom(
+        "Invalid filter name".into(),
+    )))
+}
+
+/// 初期設定を行う
+/// public_key: 公開鍵ファイルパス, 未指定時に既存設定がない場合はエラー
+/// private_key: 秘密鍵ファイルパス, 未指定時に既存設定がない場合はエラー
+/// encryption_key_id: 暗号化サブキーID, 公開鍵・秘密鍵ファイルに含まれない場合はエラー, 公開鍵内の最初の暗号化サブキーを使用する場合は指定不要
+/// encryption_path_regex: 暗号化対象パス正規表現, 未指定時に既存設定がない場合はすべてのファイルを暗号化対象とする
+/// filter_name: フィルタ名, 未指定時は"crypt"を使用
+/// yes: 非対話実行
+/// force: 設定を強制上書き
+/// dry_run: Dry-run Mode
+fn setup(
+    public_key: Option<PathBuf>,
+    private_key: Option<PathBuf>,
+    encryption_key_id: Option<String>,
+    encryption_path_regex: Option<String>,
+    filter_name: Option<String>,
+    yes: bool,
+    force: bool,
+    dry_run: bool,
+) -> Result<(), Error> {
+    // Gitリポジトリであることを確認
+    let repo = GitRepository::new()?;
+
+    // bareリポジトリに対しては処理を行わない
+    let Some(workdir) = repo.repo.workdir() else {
+        log::error!("Repository is bare, cannot setup encryption filter");
+        return Err(Error::InvalidGitRepository);
+    };
+
+    // Git設定
+    let mut config = repo.repo.config()?;
+
+    // コマンドラインから取得したオプションに加えて、既存のGit設定からも値を取得
+    let public_key = public_key
+        .or_else(|| {
+            config
+                .get_path(&GitConfig::combine_section_key(GitConfig::PUBLIC_KEY))
+                .ok()
+        })
+        .filter(|p| validate_public_key(p).is_ok_and(|v| v == Validation::Valid));
+    let private_key = private_key
+        .or_else(|| {
+            config
+                .get_path(&GitConfig::combine_section_key(GitConfig::PRIVATE_KEY))
+                .ok()
+        })
+        .filter(|p| validate_private_key(p).is_ok_and(|v| v == Validation::Valid));
+    let encryption_key_id = encryption_key_id.or_else(|| {
+        config
+            .get_string(&GitConfig::combine_section_key(
+                GitConfig::ENCRYPTION_KEY_ID,
+            ))
+            .ok()
+    });
+    let encryption_path_regex = encryption_path_regex
+        .or_else(|| {
+            config
+                .get_string(&GitConfig::combine_section_key(
+                    GitConfig::ENCRYPTION_PATH_REGEX,
+                ))
+                .ok()
+        })
+        .filter(|p| validate_encryption_path_regex(p).is_ok_and(|v| v == Validation::Valid));
+
+    // RenderConfigを設定
+    // CustomTypeで利用する設定と一致させるため、ここでグローバルに設定する
+    let render_config = RenderConfig::default();
+    set_global_render_config(render_config);
+
+    // public_keyを取得
+    let public_key = {
+        if !yes {
+            // 対話モード
+            InquirePathBuf::new("Public Key Path:", public_key.clone(), render_config)
+                .with_validator(validate_public_key)
+                .prompt()?
+        } else {
+            // 非対話モード
+            match public_key {
+                Some(path) => path,
+                None => {
+                    log::error!("Public key path is not specified");
+                    return Err(Error::Setup);
+                }
+            }
+        }
+    };
+
+    // private_keyを取得
+    let private_key = {
+        if !yes {
+            // 対話モード
+            InquirePathBuf::new("Private Key Path:", private_key.clone(), render_config)
+                .with_validator(validate_private_key)
+                .prompt()?
+        } else {
+            // 非対話モード
+            match private_key {
+                Some(path) => path,
+                None => {
+                    log::error!("Private key path is not specified");
+                    return Err(Error::Setup);
+                }
+            }
+        }
+    };
+
+    // 鍵データを読み込み
+    // 鍵の妥当性は事前に検証済みなので、ここでエラーになることはないはず
+    let public_key_data = {
+        let mut fs = File::options().read(true).open(&public_key)?;
+        let mut buf = Vec::new();
+        fs.read_to_end(&mut buf)?;
+        read_public_key(&buf)?
+    };
+
+    let private_key_data = {
+        let mut fs = File::options().read(true).open(&private_key)?;
+        let mut buf = Vec::new();
+        fs.read_to_end(&mut buf)?;
+        read_secret_key(&buf)?
+    };
+
+    // encryption_key_idに指定可能なキーID一覧を取得
+    let mut public_key_id_list = HashSet::new();
+    if public_key_data.is_encryption_key() {
+        public_key_id_list.insert(public_key_data.key_id());
+    }
+    public_key_id_list.extend(
+        public_key_data
+            .public_subkeys
+            .iter()
+            .filter(|subkey| subkey.is_encryption_key())
+            .map(|s| s.key_id()),
+    );
+
+    let mut private_key_id_list = HashSet::new();
+    private_key_id_list.insert(private_key_data.key_id());
+    private_key_id_list.extend(private_key_data.secret_subkeys.iter().map(|s| s.key_id()));
+    let encryption_id_list = public_key_id_list
+        .intersection(&private_key_id_list)
+        .map(|s| s.to_string())
+        .collect::<HashSet<_>>();
+
+    if encryption_id_list.is_empty() {
+        log::error!("No encryption subkey found in the provided keys");
+        return Err(Error::Setup);
+    }
+
+    log::debug!("Available Encryption ID list: {:?}", encryption_id_list);
+
+    let encryption_key_id = encryption_key_id.filter(|s| encryption_id_list.contains(s));
+
+    let encryption_key_id = {
+        if !yes {
+            // 対話モード
+            let encryption_id_list_vec = encryption_id_list.into_iter().collect::<Vec<_>>();
+            let starting_cursor = encryption_key_id
+                .as_ref()
+                .and_then(|id| encryption_id_list_vec.iter().position(|x| x == id))
+                .unwrap_or(0);
+            Select::new("Encryption key ID:", encryption_id_list_vec)
+                .with_starting_cursor(starting_cursor)
+                .prompt_skippable()?
+        } else {
+            // 非対話モード
+            encryption_key_id
+        }
+    };
+
+    let encryption_path_regex = {
+        if !yes {
+            // 対話モード
+            Text {
+                message: "Encryption path regex:",
+                placeholder: None,
+                initial_value: None,
+                default: encryption_path_regex.as_deref(),
+                help_message: Text::DEFAULT_HELP_MESSAGE,
+                validators: Text::DEFAULT_VALIDATORS,
+                formatter: Text::DEFAULT_FORMATTER,
+                page_size: Text::DEFAULT_PAGE_SIZE,
+                autocompleter: None,
+                render_config,
+            }
+            .with_validator(validate_encryption_path_regex)
+            .prompt_skippable()?
+        } else {
+            // 非対話モード
+            encryption_path_regex
+        }
+    };
+
+    let filter_name = {
+        if !yes {
+            // 対話モード
+            Text::new("Filter name:")
+                .with_default(filter_name.as_deref().unwrap_or("crypt"))
+                .with_validator(validate_filter_name)
+                .prompt()?
+        } else {
+            // 非対話モード
+            filter_name.unwrap_or("crypt".into())
+        }
+    };
+
+    // .gitattributesの設定内容を準備
+    // filter_nameが指定されていない場合は"crypt"を使用
+    // - `* filter=<FILTER_NAME> diff=<FILTER_NAME> merge=<FILTER_NAME>`
+    // - `<PUBLIC_KEY_PATH> filter= diff= merge=`
+    // - `<PRIVATE_KEY_PATH> filter= diff= merge=`
+    // - `.gitattributes filter= diff= merge=`
+    // - `.gitignore filter= diff= merge=`
+    // - `.gitkeep filter= diff= merge=`
+    let gitattributes_path = workdir.join(".gitattributes");
+
+    let gitattributes_file = match std::fs::File::options()
+        .read(true)
+        .open(&gitattributes_path)
+    {
+        Ok(f) => Some(f),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(Error::Io(e)),
+    };
+
+    let gitattributes = if let Some(mut f) = gitattributes_file {
+        let mut content = Vec::new();
+        f.read_to_end(&mut content)?;
+        content
+    } else {
+        Vec::new()
+    };
+
+    let mut new_gitattributes = Vec::<Vec<u8>>::new();
+    for line_buf in gitattributes.split(|&b| b == b'\n') {
+        let line = line_buf.trim_ascii_start();
+        if line.is_empty() || line.first() == Some(&b'#') {
+            // 空行・コメント行はそのまま追加
+            new_gitattributes.push(line_buf.to_vec());
+            continue;
+        }
+        // 一度既存設定を全て削除
+        let buf = line
+            .split(|&b| b.is_ascii_whitespace())
+            .filter(|v| !v.is_empty())
+            .collect::<Vec<_>>();
+        let len = buf.len();
+        let buf = buf
+            .into_iter()
+            .filter(|attr| {
+                !attr.starts_with(b"filter=")
+                    && !attr.starts_with(b"diff=")
+                    && !attr.starts_with(b"merge=")
+            })
+            .collect::<Vec<_>>();
+        if buf.len() == 1 {
+            // すべて削除された場合はスキップ
+            continue;
+        } else if buf.len() < len {
+            // 属性の一部が削除された場合は更新
+            new_gitattributes.push(buf.join(&b' '));
+        } else {
+            // 変更なし
+            new_gitattributes.push(line_buf.to_vec());
+        }
+    }
+
+    if new_gitattributes.iter().all(|line| line.is_empty()) {
+        // 全ての行が空行の場合はクリア
+        new_gitattributes.clear();
+    }
+
+    // ここまでで既存のfilter設定を削除したので、新しい設定を追加
+    new_gitattributes.push(
+        format!(
+            "* filter={} diff={} merge={}",
+            filter_name, filter_name, filter_name
+        )
+        .as_bytes()
+        .to_vec(),
+    );
+
+    if let Ok(public_key) = relative_git_path(&repo, &public_key) {
+        let mut buf = public_key.as_os_str().as_bytes().to_vec();
+        buf.extend_from_slice(b" filter= diff= merge=");
+        new_gitattributes.push(buf);
+    }
+    if let Ok(private_key) = relative_git_path(&repo, &private_key) {
+        let mut buf = private_key.as_os_str().as_bytes().to_vec();
+        buf.extend_from_slice(b" filter= diff= merge=");
+        new_gitattributes.push(buf);
+    }
+    for special_file in [".gitattributes", ".gitignore", ".gitkeep"] {
+        let mut buf = special_file.as_bytes().to_vec();
+        buf.extend_from_slice(b" filter= diff= merge=");
+        new_gitattributes.push(buf);
+    }
+
+    let new_gitattributes = new_gitattributes.join(&b'\n');
+
+    // diff表示
+
+    let mut with_difference = false;
+
+    // gitconfigの設定内容を表示
+    println!();
+    println!("[Git Config Changes]");
+    if print_gitconfig_diff(
+        &config,
+        GitConfig::PUBLIC_KEY,
+        Some(public_key.as_os_str().as_encoded_bytes()),
+    ) {
+        with_difference = true;
+    }
+    if print_gitconfig_diff(
+        &config,
+        GitConfig::PRIVATE_KEY,
+        Some(private_key.as_os_str().as_encoded_bytes()),
+    ) {
+        with_difference = true;
+    }
+    if print_gitconfig_diff(
+        &config,
+        GitConfig::ENCRYPTION_KEY_ID,
+        encryption_key_id.as_ref().map(|s| s.as_bytes()),
+    ) {
+        with_difference = true;
+    }
+    if print_gitconfig_diff(
+        &config,
+        GitConfig::ENCRYPTION_PATH_REGEX,
+        encryption_path_regex.as_ref().map(|s| s.as_bytes()),
+    ) {
+        with_difference = true;
+    }
+    println!();
+    println!("[.gitattributes Changes]");
+
+    println!("-----");
+    for change in similar::TextDiff::from_lines(
+        &String::from_utf8_lossy(&gitattributes),
+        &String::from_utf8_lossy(&new_gitattributes),
+    )
+    .iter_all_changes()
+    {
+        let (sign, color) = match change.tag() {
+            ChangeTag::Delete => {
+                with_difference = true;
+                ("-", Color::Red)
+            }
+            ChangeTag::Insert => {
+                with_difference = true;
+                ("+", Color::Green)
+            }
+            ChangeTag::Equal => (" ", Color::White),
+        };
+        let out = format!("{} {}", sign, change).color(color);
+        print!("{}", out);
+    }
+    println!("-----");
+    println!();
+
+    if dry_run {
+        println!("Dry-run mode: No changes were applied.");
+        return Ok(());
+    }
+
+    // 変更がある場合のみ適用
+    if with_difference {
+        // ユーザ確認
+        if !force && !yes {
+            // 対話モード
+            let proceed = Confirm::new("Apply these changes?")
+                .with_default(false)
+                .prompt()?;
+            if !proceed {
+                println!("Aborted by user.");
+                return Ok(());
+            }
+        }
+
+        // 設定を適用
+        if let Some(pubkey_str) = public_key.as_os_str().to_str() {
+            config.set_str(
+                &GitConfig::combine_section_key(GitConfig::PUBLIC_KEY),
+                pubkey_str,
+            )?;
+        } else {
+            return Err(Error::Setup);
+        }
+        if let Some(privkey_str) = private_key.as_os_str().to_str() {
+            config.set_str(
+                &GitConfig::combine_section_key(GitConfig::PRIVATE_KEY),
+                privkey_str,
+            )?;
+        } else {
+            return Err(Error::Setup);
+        }
+        if let Some(encryption_key_id) = &encryption_key_id.as_deref().filter(|s| !s.is_empty()) {
+            config.set_str(
+                &GitConfig::combine_section_key(GitConfig::ENCRYPTION_KEY_ID),
+                encryption_key_id,
+            )?;
+        }
+        if let Some(encryption_path_regex) =
+            &encryption_path_regex.as_deref().filter(|s| !s.is_empty())
+        {
+            config.set_str(
+                &GitConfig::combine_section_key(GitConfig::ENCRYPTION_PATH_REGEX),
+                encryption_path_regex,
+            )?;
+        }
+        std::fs::File::options()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&gitattributes_path)?
+            .write_all(&new_gitattributes)?;
+    }
+
+    Ok(())
+}
+
+// Git設定の差分を表示
+// 変更がある場合はtrueを返す
+fn print_gitconfig_diff(config: &Config, key: &str, new_value: Option<&[u8]>) -> bool {
+    let key = GitConfig::combine_section_key(key);
+    let old_value = config
+        .get_entry(&key)
+        .ok()
+        .map(|x| x.value_bytes().to_vec());
+    let new_value = new_value.and_then(|v| {
+        if v.iter().all(|&b| b.is_ascii_whitespace()) {
+            None
+        } else {
+            Some(v)
+        }
+    });
+    if old_value.as_deref() == new_value {
+        if let Some(v) = new_value {
+            println!("  {} = {}", key, v.escape_ascii());
+        }
+        false
+    } else {
+        if let Some(v) = old_value {
+            println!("{}", format!("- {} = {}", key, v.escape_ascii()).red());
+        }
+        if let Some(v) = new_value {
+            println!("{}", format!("+ {} = {}", key, v.escape_ascii()).green());
+        }
+        true
+    }
+}
+
+fn relative_git_path(repo: &GitRepository, path: &Path) -> Result<PathBuf, Error> {
+    // ワーキングディレクトリを取得
+    let workdir = repo.repo.workdir().ok_or(Error::InvalidGitRepository)?;
+
+    let abs_path = path::absolute(path.canonicalize()?)?;
+    let abs_workdir = path::absolute(workdir.canonicalize()?)?;
+    abs_path
+        .strip_prefix(&abs_workdir)
+        .map(|p| p.to_path_buf())
+        .map_err(|_| Error::PathIsOutsideOfRepository)
 }
