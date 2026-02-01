@@ -2046,6 +2046,18 @@ fn setup(
         Vec::new()
     };
 
+    let mut special_files = vec![
+        b".gitattributes".to_vec(),
+        b".gitignore".to_vec(),
+        b".gitkeep".to_vec(),
+    ];
+    if let Ok(public_key) = relative_git_path(&repo, &public_key) {
+        special_files.push(public_key.as_os_str().as_bytes().to_vec());
+    }
+    if let Ok(private_key) = relative_git_path(&repo, &private_key) {
+        special_files.push(private_key.as_os_str().as_bytes().to_vec());
+    }
+
     let mut new_gitattributes = Vec::<Vec<u8>>::new();
     for line_buf in gitattributes.split(|&b| b == b'\n') {
         let line = line_buf.trim_ascii_start();
@@ -2059,6 +2071,11 @@ fn setup(
             .split(|&b| b.is_ascii_whitespace())
             .filter(|v| !v.is_empty())
             .collect::<Vec<_>>();
+        if buf.first() != Some(&b"*".as_slice()) || special_files.iter().any(|f| Some(&f.as_slice()) == buf.first()) {
+            // `*` または 特殊ファイル以外のパス指定の場合はそのまま追加
+            new_gitattributes.push(line_buf.to_vec());
+            continue;
+        }
         let len = buf.len();
         let buf = buf
             .into_iter()
@@ -2068,11 +2085,12 @@ fn setup(
                     && !attr.starts_with(b"merge=")
             })
             .collect::<Vec<_>>();
-        if buf.len() == 1 {
-            // すべて削除された場合はスキップ
-            continue;
-        } else if buf.len() < len {
+        if buf.len() < len {
             // 属性の一部が削除された場合は更新
+            if buf.len() <= 1 {
+                // 属性が1つ以下になった場合はスキップ
+                continue;
+            }
             new_gitattributes.push(buf.join(&b' '));
         } else {
             // 変更なし
@@ -2095,18 +2113,8 @@ fn setup(
         .to_vec(),
     );
 
-    if let Ok(public_key) = relative_git_path(&repo, &public_key) {
-        let mut buf = public_key.as_os_str().as_bytes().to_vec();
-        buf.extend_from_slice(b" filter= diff= merge=");
-        new_gitattributes.push(buf);
-    }
-    if let Ok(private_key) = relative_git_path(&repo, &private_key) {
-        let mut buf = private_key.as_os_str().as_bytes().to_vec();
-        buf.extend_from_slice(b" filter= diff= merge=");
-        new_gitattributes.push(buf);
-    }
-    for special_file in [".gitattributes", ".gitignore", ".gitkeep"] {
-        let mut buf = special_file.as_bytes().to_vec();
+    for special_file in special_files.as_slice() {
+        let mut buf = special_file.clone();
         buf.extend_from_slice(b" filter= diff= merge=");
         new_gitattributes.push(buf);
     }
