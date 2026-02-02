@@ -320,7 +320,7 @@ fn main() {
             }
         }
         Commands::Setup { args } => {
-            if let Err(e) = setup(args) {
+            if let Err(e) = setup(&args) {
                 log::error!("Setup failed: {}", e);
                 std::process::exit(1);
             }
@@ -1981,8 +1981,8 @@ fn build_setup_plan(
     });
 
     let encryption_path_regex = args
-        .clone()
         .encryption_path_regex
+        .clone()
         .or_else(|| {
             config
                 .get_string(&GitConfig::combine_section_key(
@@ -2030,7 +2030,7 @@ fn build_setup_plan(
                 .prompt()?
         } else {
             // 非対話モード
-            args.clone().filter_name.unwrap_or("crypt".into())
+            args.filter_name.clone().unwrap_or("crypt".into())
         }
     };
 
@@ -2189,14 +2189,14 @@ fn apply_setup_plan(
         .write(true)
         .create(true)
         .truncate(true)
-        .open(&gitattributes_path)?
+        .open(gitattributes_path)?
         .write_all(&setup_plan.gitattributes_new)?;
 
     Ok(())
 }
 
 /// 初期設定を行う
-fn setup(args: SetupArguments) -> Result<(), Error> {
+fn setup(args: &SetupArguments) -> Result<(), Error> {
     // Gitリポジトリであることを確認
     let repo = GitRepository::new()?;
 
@@ -2228,7 +2228,7 @@ fn setup(args: SetupArguments) -> Result<(), Error> {
         Vec::new()
     };
 
-    let setup_plan = build_setup_plan(&config, &git_attributes, &args, &repo)?;
+    let setup_plan = build_setup_plan(&config, &git_attributes, args, &repo)?;
 
     // diff表示
     print_setup_plan(&setup_plan);
