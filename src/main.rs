@@ -1908,33 +1908,12 @@ fn resolve_private_key(
     Ok((private_key, private_key_data))
 }
 
-fn build_gitconfig_changes(
+fn resolve_encryption_key_id(
+    public_key_data: &SignedPublicKey,
+    private_key_data: &SignedSecretKey,
     args: &SetupArguments,
     config: &Config,
-    render_config: RenderConfig,
-) -> Result<(Vec<ConfigChange>, Vec<PathBuf>), Error> {
-    let mut gitconfig_changes = Vec::new();
-
-    // public_keyを取得
-    let (public_key, public_key_data) = resolve_public_key(args, config, render_config)?;
-
-    let key = GitConfig::combine_section_key(GitConfig::PUBLIC_KEY);
-    gitconfig_changes.push(ConfigChange {
-        old_value: config.get_string(&key).ok(),
-        key,
-        new_value: Some(public_key.to_string_lossy().to_string()),
-    });
-
-    // private_keyを取得
-    let (private_key, private_key_data) = resolve_private_key(args, config, render_config)?;
-
-    let key = GitConfig::combine_section_key(GitConfig::PRIVATE_KEY);
-    gitconfig_changes.push(ConfigChange {
-        old_value: config.get_string(&key).ok(),
-        key,
-        new_value: Some(private_key.to_string_lossy().to_string()),
-    });
-
+) -> Result<Option<String>, Error> {
     // encryption_key_idに指定可能なキーID一覧を取得
     let mut public_key_id_list = HashSet::new();
     if public_key_data.is_encryption_key() {
@@ -1988,6 +1967,39 @@ fn build_gitconfig_changes(
             encryption_key_id
         }
     };
+    Ok(encryption_key_id)
+}
+
+fn build_gitconfig_changes(
+    args: &SetupArguments,
+    config: &Config,
+    render_config: RenderConfig,
+) -> Result<(Vec<ConfigChange>, Vec<PathBuf>), Error> {
+    let mut gitconfig_changes = Vec::new();
+
+    // public_keyを取得
+    let (public_key, public_key_data) = resolve_public_key(args, config, render_config)?;
+
+    let key = GitConfig::combine_section_key(GitConfig::PUBLIC_KEY);
+    gitconfig_changes.push(ConfigChange {
+        old_value: config.get_string(&key).ok(),
+        key,
+        new_value: Some(public_key.to_string_lossy().to_string()),
+    });
+
+    // private_keyを取得
+    let (private_key, private_key_data) = resolve_private_key(args, config, render_config)?;
+
+    let key = GitConfig::combine_section_key(GitConfig::PRIVATE_KEY);
+    gitconfig_changes.push(ConfigChange {
+        old_value: config.get_string(&key).ok(),
+        key,
+        new_value: Some(private_key.to_string_lossy().to_string()),
+    });
+
+    let encryption_key_id =
+        resolve_encryption_key_id(&public_key_data, &private_key_data, args, config)?;
+
     let key = GitConfig::combine_section_key(GitConfig::ENCRYPTION_KEY_ID);
     gitconfig_changes.push(ConfigChange {
         old_value: config.get_string(&key).ok(),
