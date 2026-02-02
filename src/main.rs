@@ -2039,19 +2039,21 @@ fn build_gitconfig_changes(
     Ok((gitconfig_changes, public_key, private_key))
 }
 
-fn build_setup_plan(
-    config: &Config,
-    git_attributes: &[u8],
+fn build_gitattributes(
     args: &SetupArguments,
     repo: &GitRepository,
-) -> Result<SetupPlan, Error> {
-    // RenderConfigを設定
-    // CustomTypeで利用する設定と一致させるため、ここでグローバルに設定する
-    let render_config = RenderConfig::default();
-    set_global_render_config(render_config);
-
-    let (gitconfig_changes, public_key, private_key) =
-        build_gitconfig_changes(args, config, render_config)?;
+    public_key: &Path,
+    private_key: &Path,
+    git_attributes: &[u8],
+) -> Result<Vec<u8>, Error> {
+    // .gitattributesの設定内容を準備
+    // filter_nameが指定されていない場合は"crypt"を使用
+    // - `* filter=<FILTER_NAME> diff=<FILTER_NAME> merge=<FILTER_NAME>`
+    // - `<PUBLIC_KEY_PATH> filter= diff= merge=`
+    // - `<PRIVATE_KEY_PATH> filter= diff= merge=`
+    // - `.gitattributes filter= diff= merge=`
+    // - `.gitignore filter= diff= merge=`
+    // - `.gitkeep filter= diff= merge=`
 
     let filter_name = {
         if !args.yes {
@@ -2066,24 +2068,15 @@ fn build_setup_plan(
         }
     };
 
-    // .gitattributesの設定内容を準備
-    // filter_nameが指定されていない場合は"crypt"を使用
-    // - `* filter=<FILTER_NAME> diff=<FILTER_NAME> merge=<FILTER_NAME>`
-    // - `<PUBLIC_KEY_PATH> filter= diff= merge=`
-    // - `<PRIVATE_KEY_PATH> filter= diff= merge=`
-    // - `.gitattributes filter= diff= merge=`
-    // - `.gitignore filter= diff= merge=`
-    // - `.gitkeep filter= diff= merge=`
-
     let mut special_files = vec![
         b".gitattributes".to_vec(),
         b".gitignore".to_vec(),
         b".gitkeep".to_vec(),
     ];
-    if let Ok(public_key) = relative_git_path(repo, &public_key) {
+    if let Ok(public_key) = relative_git_path(repo, public_key) {
         special_files.push(public_key.as_os_str().as_bytes().to_vec());
     }
-    if let Ok(private_key) = relative_git_path(repo, &private_key) {
+    if let Ok(private_key) = relative_git_path(repo, private_key) {
         special_files.push(private_key.as_os_str().as_bytes().to_vec());
     }
 
@@ -2154,6 +2147,25 @@ fn build_setup_plan(
     }
 
     let new_gitattributes = new_gitattributes.join(&b'\n');
+    Ok(new_gitattributes)
+}
+
+fn build_setup_plan(
+    config: &Config,
+    git_attributes: &[u8],
+    args: &SetupArguments,
+    repo: &GitRepository,
+) -> Result<SetupPlan, Error> {
+    // RenderConfigを設定
+    // CustomTypeで利用する設定と一致させるため、ここでグローバルに設定する
+    let render_config = RenderConfig::default();
+    set_global_render_config(render_config);
+
+    let (gitconfig_changes, public_key, private_key) =
+        build_gitconfig_changes(args, config, render_config)?;
+
+    let new_gitattributes =
+        build_gitattributes(args, repo, &public_key, &private_key, git_attributes)?;
 
     Ok(SetupPlan {
         gitconfig_changes,
