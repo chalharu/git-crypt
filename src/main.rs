@@ -2196,14 +2196,6 @@ fn apply_setup_plan(
 }
 
 /// 初期設定を行う
-/// public_key: 公開鍵ファイルパス, 未指定時に既存設定がない場合はエラー
-/// private_key: 秘密鍵ファイルパス, 未指定時に既存設定がない場合はエラー
-/// encryption_key_id: 暗号化サブキーID, 公開鍵・秘密鍵ファイルに含まれない場合はエラー, 公開鍵内の最初の暗号化サブキーを使用する場合は指定不要
-/// encryption_path_regex: 暗号化対象パス正規表現, 未指定時に既存設定がない場合はすべてのファイルを暗号化対象とする
-/// filter_name: フィルタ名, 未指定時は"crypt"を使用
-/// yes: 非対話実行
-/// force: 設定を強制上書き
-/// dry_run: Dry-run Mode
 fn setup(args: SetupArguments) -> Result<(), Error> {
     // Gitリポジトリであることを確認
     let repo = GitRepository::new()?;
