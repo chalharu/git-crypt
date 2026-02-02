@@ -1799,8 +1799,39 @@ struct ConfigChange {
     new_value: Option<String>,
 }
 
+struct ConfigChanges {
+    changes: HashMap<String, (Option<String>, Option<String>)>,
+}
+
+impl ConfigChanges {
+    fn new() -> Self {
+        ConfigChanges {
+            changes: HashMap::new(),
+        }
+    }
+
+    fn push(&mut self, change: ConfigChange) {
+        self.changes
+            .insert(change.key, (change.old_value, change.new_value));
+    }
+
+    fn is_empty(&self) -> bool {
+        self.changes.is_empty()
+    }
+
+    fn iter(&self) -> impl Iterator<Item = ConfigChange> + '_ {
+        self.changes
+            .iter()
+            .map(|(key, (old_value, new_value))| ConfigChange {
+                key: key.clone(),
+                old_value: old_value.clone(),
+                new_value: new_value.clone(),
+            })
+    }
+}
+
 struct SetupPlan {
-    gitconfig_changes: Vec<ConfigChange>,
+    gitconfig_changes: ConfigChanges,
     gitattributes_old: Vec<u8>,
     gitattributes_new: Vec<u8>,
 }
@@ -2010,8 +2041,8 @@ fn build_gitconfig_changes(
     args: &SetupArguments,
     config: &Config,
     render_config: RenderConfig,
-) -> Result<(Vec<ConfigChange>, Vec<PathBuf>), Error> {
-    let mut gitconfig_changes = Vec::new();
+) -> Result<(ConfigChanges, Vec<PathBuf>), Error> {
+    let mut gitconfig_changes = ConfigChanges::new();
 
     // public_keyを取得
     let (public_key, public_key_data) = resolve_public_key(args, config, render_config)?;
