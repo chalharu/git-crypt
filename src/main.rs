@@ -1826,30 +1826,39 @@ impl SetupPlan {
     }
 }
 
-fn resolve_public_key(
-    args: &SetupArguments,
+fn resolve_key<V>(
+    path: &Option<PathBuf>,
+    config_section_key: &str,
     config: &Config,
+    yes: bool,
     render_config: RenderConfig,
-) -> Result<(PathBuf, SignedPublicKey), Error> {
-    let public_key = args
-        .public_key
+    key_type: &str,
+    validator: V,
+) -> Result<(PathBuf, Vec<u8>), Error>
+where
+    V: CustomTypeValidator<PathBuf> + 'static,
+{
+    let key_path = path
         .clone()
         .or_else(|| {
             config
-                .get_path(&GitConfig::combine_section_key(GitConfig::PUBLIC_KEY))
+                .get_path(&GitConfig::combine_section_key(config_section_key))
                 .ok()
         })
-        .filter(|p| validate_public_key(p).is_ok_and(|v| v == Validation::Valid));
-    // public_keyを取得
-    let public_key = {
-        if !args.yes {
+        .filter(|p| validator.validate(p).is_ok_and(|v| v == Validation::Valid));
+    let key_path = {
+        if !yes {
             // 対話モード
-            InquirePathBuf::new("Public Key Path:", public_key.clone(), render_config)
-                .with_validator(validate_public_key)
-                .prompt()?
+            InquirePathBuf::new(
+                &format!("{} Path:", key_type),
+                key_path.clone(),
+                render_config,
+            )
+            .with_validator(validator)
+            .prompt()?
         } else {
             // 非対話モード
-            match public_key {
+            match key_path {
                 Some(path) => path.to_path_buf(),
                 None => {
                     log::error!("Public key path is not specified");
@@ -1858,13 +1867,29 @@ fn resolve_public_key(
             }
         }
     };
-    let public_key_data = {
-        let mut fs = File::options().read(true).open(&public_key)?;
-        let mut buf = Vec::new();
-        fs.read_to_end(&mut buf)?;
-        read_public_key(&buf)?
-    };
-    Ok((public_key, public_key_data))
+
+    let mut fs = File::options().read(true).open(&key_path)?;
+    let mut buf = Vec::new();
+    fs.read_to_end(&mut buf)?;
+    Ok((key_path, buf))
+}
+
+fn resolve_public_key(
+    args: &SetupArguments,
+    config: &Config,
+    render_config: RenderConfig,
+) -> Result<(PathBuf, SignedPublicKey), Error> {
+    let (public_key_path, public_key_buf) = resolve_key(
+        &args.public_key,
+        GitConfig::PUBLIC_KEY,
+        config,
+        args.yes,
+        render_config,
+        "Public Key",
+        validate_public_key,
+    )?;
+    let public_key_data = read_public_key(&public_key_buf)?;
+    Ok((public_key_path, public_key_data))
 }
 
 fn resolve_private_key(
@@ -1872,40 +1897,17 @@ fn resolve_private_key(
     config: &Config,
     render_config: RenderConfig,
 ) -> Result<(PathBuf, SignedSecretKey), Error> {
-    let private_key = args
-        .private_key
-        .clone()
-        .or_else(|| {
-            config
-                .get_path(&GitConfig::combine_section_key(GitConfig::PRIVATE_KEY))
-                .ok()
-        })
-        .filter(|p| validate_private_key(p).is_ok_and(|v| v == Validation::Valid));
-
-    let private_key = {
-        if !args.yes {
-            // 対話モード
-            InquirePathBuf::new("Private Key Path:", private_key.clone(), render_config)
-                .with_validator(validate_private_key)
-                .prompt()?
-        } else {
-            // 非対話モード
-            match private_key {
-                Some(path) => path,
-                None => {
-                    log::error!("Private key path is not specified");
-                    return Err(Error::Setup);
-                }
-            }
-        }
-    };
-    let private_key_data = {
-        let mut fs = File::options().read(true).open(&private_key)?;
-        let mut buf = Vec::new();
-        fs.read_to_end(&mut buf)?;
-        read_secret_key(&buf)?
-    };
-    Ok((private_key, private_key_data))
+    let (private_key_path, private_key_buf) = resolve_key(
+        &args.private_key,
+        GitConfig::PRIVATE_KEY,
+        config,
+        args.yes,
+        render_config,
+        "Private Key",
+        validate_private_key,
+    )?;
+    let private_key_data = read_secret_key(&private_key_buf)?;
+    Ok((private_key_path, private_key_data))
 }
 
 fn resolve_encryption_key_id(
@@ -1962,6 +1964,7 @@ fn resolve_encryption_key_id(
             Select::new("Encryption key ID:", encryption_id_list_vec)
                 .with_starting_cursor(starting_cursor)
                 .prompt_skippable()?
+                .filter(|v| !v.is_empty())
         } else {
             // 非対話モード
             encryption_key_id
@@ -2004,6 +2007,7 @@ fn resolve_encryption_path_regex(
             }
             .with_validator(validate_encryption_path_regex)
             .prompt_skippable()?
+            .filter(|v| !v.is_empty())
         } else {
             // 非対話モード
             encryption_path_regex
