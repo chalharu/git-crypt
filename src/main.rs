@@ -2046,7 +2046,7 @@ fn build_gitconfig_changes(
     gitconfig_changes.push(ConfigChange {
         old_value: config.get_string(&key).ok(),
         key,
-        new_value: encryption_key_id.clone(),
+        new_value: encryption_key_id,
     });
 
     let encryption_path_regex = resolve_encryption_path_regex(args, config, render_config)?;
@@ -2054,7 +2054,7 @@ fn build_gitconfig_changes(
     gitconfig_changes.push(ConfigChange {
         old_value: config.get_string(&key).ok(),
         key,
-        new_value: encryption_path_regex.clone(),
+        new_value: encryption_path_regex,
     });
 
     Ok((gitconfig_changes, vec![public_key, private_key]))
