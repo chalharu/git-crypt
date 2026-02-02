@@ -1703,18 +1703,25 @@ impl<'a> InquirePathBuf<'a> {
     }
 }
 
-fn validate_public_key<P: AsRef<Path>>(
+#[derive(Debug, Clone, Copy)]
+enum KeyType {
+    Public,
+    Private,
+}
+
+fn validate_key<P: AsRef<Path>>(
     p: &P,
+    key_type: KeyType,
 ) -> Result<Validation, Box<dyn std::error::Error + Send + Sync + 'static>> {
     if p.as_ref().as_os_str().to_str().is_none() {
         return Ok(Validation::Invalid(ErrorMessage::Custom(
-            "Public key path contains invalid UTF-8 characters".into(),
+            "Key path contains invalid UTF-8 characters".into(),
         )));
     }
     // 鍵ファイルの存在確認と検証
     if !p.as_ref().exists() || !p.as_ref().is_file() {
         return Ok(Validation::Invalid(ErrorMessage::Custom(
-            "Public key file does not exist or is not a file".into(),
+            "Key file does not exist or is not a file".into(),
         )));
     }
     let mut fs = File::options().read(true).open(p)?;
@@ -1722,51 +1729,34 @@ fn validate_public_key<P: AsRef<Path>>(
         // 1MBを超えるファイルは拒否
         // 普通はそんなに大きな公開鍵ファイルは存在しないはず
         return Ok(Validation::Invalid(ErrorMessage::Custom(
-            "Public key file is too large (>1MB)".into(),
+            "Key file is too large (>1MB)".into(),
         )));
     }
     let mut buf = Vec::new();
     fs.read_to_end(&mut buf)?;
-    if let Err(e) = read_public_key(&buf) {
+
+    if let Err(e) = match key_type {
+        KeyType::Public => read_public_key(&buf).map(|_| ()),
+        KeyType::Private => read_secret_key(&buf).map(|_| ()),
+    } {
         return Ok(Validation::Invalid(ErrorMessage::Custom(format!(
-            "Failed to read public key: {}",
+            "Failed to read key: {}",
             e
         ))));
     }
     Ok(Validation::Valid)
 }
 
+fn validate_public_key<P: AsRef<Path>>(
+    p: &P,
+) -> Result<Validation, Box<dyn std::error::Error + Send + Sync + 'static>> {
+    validate_key(p, KeyType::Public)
+}
+
 fn validate_private_key<P: AsRef<Path>>(
     p: &P,
 ) -> Result<Validation, Box<dyn std::error::Error + Send + Sync + 'static>> {
-    if p.as_ref().as_os_str().to_str().is_none() {
-        return Ok(Validation::Invalid(ErrorMessage::Custom(
-            "Private key path contains invalid UTF-8 characters".into(),
-        )));
-    }
-    // 鍵ファイルの存在確認と検証
-    if !p.as_ref().exists() || !p.as_ref().is_file() {
-        return Ok(Validation::Invalid(ErrorMessage::Custom(
-            "Private key file does not exist or is not a file".into(),
-        )));
-    }
-    let mut fs = File::options().read(true).open(p)?;
-    if fs.metadata()?.len() > 1024 * 1024 {
-        // 1MBを超えるファイルは拒否
-        // 普通はそんなに大きな公開鍵ファイルは存在しないはず
-        return Ok(Validation::Invalid(ErrorMessage::Custom(
-            "Private key file is too large (>1MB)".into(),
-        )));
-    }
-    let mut buf = Vec::new();
-    fs.read_to_end(&mut buf)?;
-    if let Err(e) = read_secret_key(&buf) {
-        return Ok(Validation::Invalid(ErrorMessage::Custom(format!(
-            "Failed to read public key: {}",
-            e
-        ))));
-    }
-    Ok(Validation::Valid)
+    validate_key(p, KeyType::Private)
 }
 
 fn validate_encryption_path_regex(
