@@ -2079,7 +2079,7 @@ fn resolve_filter_name(args: &SetupArguments) -> Result<String, Error> {
 fn build_gitattributes<P: AsRef<Path>>(
     args: &SetupArguments,
     repo: &GitRepository,
-    additinal_paths: &[P],
+    additional_paths: &[P],
     git_attributes: &[u8],
 ) -> Result<Vec<u8>, Error> {
     // .gitattributesの設定内容を準備
@@ -2099,7 +2099,7 @@ fn build_gitattributes<P: AsRef<Path>>(
         b".gitkeep".to_vec(),
     ];
 
-    for path in additinal_paths {
+    for path in additional_paths {
         if let Ok(relative_path) = relative_git_path(repo, path.as_ref()) {
             special_files.push(relative_path.as_os_str().as_bytes().to_vec());
         }
