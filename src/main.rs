@@ -2060,6 +2060,22 @@ fn build_gitconfig_changes(
     Ok((gitconfig_changes, vec![public_key, private_key]))
 }
 
+fn resolve_filter_name(args: &SetupArguments) -> Result<String, Error> {
+    let filter_name = {
+        if !args.yes {
+            // 対話モード
+            Text::new("Filter name:")
+                .with_default(args.filter_name.as_deref().unwrap_or("crypt"))
+                .with_validator(validate_filter_name)
+                .prompt()?
+        } else {
+            // 非対話モード
+            args.filter_name.clone().unwrap_or("crypt".into())
+        }
+    };
+    Ok(filter_name)
+}
+
 fn build_gitattributes<P: AsRef<Path>>(
     args: &SetupArguments,
     repo: &GitRepository,
@@ -2075,18 +2091,7 @@ fn build_gitattributes<P: AsRef<Path>>(
     // - `.gitignore filter= diff= merge=`
     // - `.gitkeep filter= diff= merge=`
 
-    let filter_name = {
-        if !args.yes {
-            // 対話モード
-            Text::new("Filter name:")
-                .with_default(args.filter_name.as_deref().unwrap_or("crypt"))
-                .with_validator(validate_filter_name)
-                .prompt()?
-        } else {
-            // 非対話モード
-            args.filter_name.clone().unwrap_or("crypt".into())
-        }
-    };
+    let filter_name = resolve_filter_name(args)?;
 
     let mut special_files = vec![
         b".gitattributes".to_vec(),
