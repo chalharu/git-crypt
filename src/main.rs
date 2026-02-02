@@ -1970,6 +1970,48 @@ fn resolve_encryption_key_id(
     Ok(encryption_key_id)
 }
 
+fn resolve_encryption_path_regex(
+    args: &SetupArguments,
+    config: &Config,
+    render_config: RenderConfig,
+) -> Result<Option<String>, Error> {
+    let encryption_path_regex = args
+        .encryption_path_regex
+        .clone()
+        .or_else(|| {
+            config
+                .get_string(&GitConfig::combine_section_key(
+                    GitConfig::ENCRYPTION_PATH_REGEX,
+                ))
+                .ok()
+        })
+        .filter(|p| validate_encryption_path_regex(p).is_ok_and(|v| v == Validation::Valid));
+
+    let encryption_path_regex = {
+        if !args.yes {
+            // 対話モード
+            Text {
+                message: "Encryption path regex:",
+                placeholder: None,
+                initial_value: None,
+                default: encryption_path_regex.as_deref(),
+                help_message: Text::DEFAULT_HELP_MESSAGE,
+                validators: Text::DEFAULT_VALIDATORS,
+                formatter: Text::DEFAULT_FORMATTER,
+                page_size: Text::DEFAULT_PAGE_SIZE,
+                autocompleter: None,
+                render_config,
+            }
+            .with_validator(validate_encryption_path_regex)
+            .prompt_skippable()?
+        } else {
+            // 非対話モード
+            encryption_path_regex
+        }
+    };
+    Ok(encryption_path_regex)
+}
+
 fn build_gitconfig_changes(
     args: &SetupArguments,
     config: &Config,
@@ -2007,40 +2049,7 @@ fn build_gitconfig_changes(
         new_value: encryption_key_id.clone(),
     });
 
-    let encryption_path_regex = args
-        .encryption_path_regex
-        .clone()
-        .or_else(|| {
-            config
-                .get_string(&GitConfig::combine_section_key(
-                    GitConfig::ENCRYPTION_PATH_REGEX,
-                ))
-                .ok()
-        })
-        .filter(|p| validate_encryption_path_regex(p).is_ok_and(|v| v == Validation::Valid));
-
-    let encryption_path_regex = {
-        if !args.yes {
-            // 対話モード
-            Text {
-                message: "Encryption path regex:",
-                placeholder: None,
-                initial_value: None,
-                default: encryption_path_regex.as_deref(),
-                help_message: Text::DEFAULT_HELP_MESSAGE,
-                validators: Text::DEFAULT_VALIDATORS,
-                formatter: Text::DEFAULT_FORMATTER,
-                page_size: Text::DEFAULT_PAGE_SIZE,
-                autocompleter: None,
-                render_config,
-            }
-            .with_validator(validate_encryption_path_regex)
-            .prompt_skippable()?
-        } else {
-            // 非対話モード
-            encryption_path_regex
-        }
-    };
+    let encryption_path_regex = resolve_encryption_path_regex(args, config, render_config)?;
     let key = GitConfig::combine_section_key(GitConfig::ENCRYPTION_PATH_REGEX);
     gitconfig_changes.push(ConfigChange {
         old_value: config.get_string(&key).ok(),
