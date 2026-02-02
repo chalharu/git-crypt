@@ -2130,6 +2130,71 @@ fn build_setup_plan(
     })
 }
 
+fn print_setup_plan(setup_plan: &SetupPlan) {
+    println!();
+    println!("[Git Config Changes]");
+    setup_plan.gitconfig_changes.iter().for_each(|change| {
+        if change.old_value == change.new_value {
+            if let Some(v) = change.new_value.as_ref() {
+                println!("  {} = {}", change.key, v);
+            }
+        } else {
+            if let Some(v) = change.old_value.as_ref() {
+                println!("{}", format!("- {} = {}", change.key, v).red());
+            }
+            if let Some(v) = change.new_value.as_ref() {
+                println!("{}", format!("+ {} = {}", change.key, v).green());
+            }
+        }
+    });
+
+    println!();
+    println!("[.gitattributes Changes]");
+
+    println!("-----");
+    for change in similar::TextDiff::from_lines(
+        &String::from_utf8_lossy(&setup_plan.gitattributes_old),
+        &String::from_utf8_lossy(&setup_plan.gitattributes_new),
+    )
+    .iter_all_changes()
+    {
+        let (sign, color) = match change.tag() {
+            ChangeTag::Delete => ("-", Color::Red),
+            ChangeTag::Insert => ("+", Color::Green),
+            ChangeTag::Equal => (" ", Color::White),
+        };
+        let out = format!("{} {}", sign, change).color(color);
+        print!("{}", out);
+    }
+    println!("-----");
+    println!();
+}
+
+fn apply_setup_plan(
+    setup_plan: &SetupPlan,
+    config: &mut Config,
+    gitattributes_path: &Path,
+) -> Result<(), Error> {
+    // 設定を適用
+    for change in setup_plan.gitconfig_changes.iter() {
+        if change.new_value != change.old_value {
+            if let Some(new_value) = change.new_value.as_ref() {
+                config.set_str(&change.key, new_value)?;
+            } else {
+                config.remove(&change.key)?;
+            }
+        }
+    }
+    std::fs::File::options()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&gitattributes_path)?
+        .write_all(&setup_plan.gitattributes_new)?;
+
+    Ok(())
+}
+
 /// 初期設定を行う
 /// public_key: 公開鍵ファイルパス, 未指定時に既存設定がない場合はエラー
 /// private_key: 秘密鍵ファイルパス, 未指定時に既存設定がない場合はエラー
@@ -2174,45 +2239,7 @@ fn setup(args: SetupArguments) -> Result<(), Error> {
     let setup_plan = build_setup_plan(&config, &git_attributes, &args, &repo)?;
 
     // diff表示
-
-    // gitconfigの設定内容を表示
-    println!();
-    println!("[Git Config Changes]");
-    setup_plan.gitconfig_changes.iter().for_each(|change| {
-        if change.old_value == change.new_value {
-            if let Some(v) = change.new_value.as_ref() {
-                println!("  {} = {}", change.key, v);
-            }
-        } else {
-            if let Some(v) = change.old_value.as_ref() {
-                println!("{}", format!("- {} = {}", change.key, v).red());
-            }
-            if let Some(v) = change.new_value.as_ref() {
-                println!("{}", format!("+ {} = {}", change.key, v).green());
-            }
-        }
-    });
-
-    println!();
-    println!("[.gitattributes Changes]");
-
-    println!("-----");
-    for change in similar::TextDiff::from_lines(
-        &String::from_utf8_lossy(&setup_plan.gitattributes_old),
-        &String::from_utf8_lossy(&setup_plan.gitattributes_new),
-    )
-    .iter_all_changes()
-    {
-        let (sign, color) = match change.tag() {
-            ChangeTag::Delete => ("-", Color::Red),
-            ChangeTag::Insert => ("+", Color::Green),
-            ChangeTag::Equal => (" ", Color::White),
-        };
-        let out = format!("{} {}", sign, change).color(color);
-        print!("{}", out);
-    }
-    println!("-----");
-    println!();
+    print_setup_plan(&setup_plan);
 
     if args.dry_run {
         println!("Dry-run mode: No changes were applied.");
@@ -2232,23 +2259,7 @@ fn setup(args: SetupArguments) -> Result<(), Error> {
                 return Ok(());
             }
         }
-
-        // 設定を適用
-        for change in setup_plan.gitconfig_changes.iter() {
-            if change.new_value != change.old_value {
-                if let Some(new_value) = change.new_value.as_ref() {
-                    config.set_str(&change.key, new_value)?;
-                } else {
-                    config.remove(&change.key)?;
-                }
-            }
-        }
-        std::fs::File::options()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&gitattributes_path)?
-            .write_all(&setup_plan.gitattributes_new)?;
+        apply_setup_plan(&setup_plan, &mut config, &gitattributes_path)?;
     }
 
     Ok(())
