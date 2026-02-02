@@ -1826,19 +1826,11 @@ impl SetupPlan {
     }
 }
 
-fn build_setup_plan(
-    config: &Config,
-    git_attributes: &[u8],
+fn resolve_public_key(
     args: &SetupArguments,
-    repo: &GitRepository,
-) -> Result<SetupPlan, Error> {
-    // RenderConfigを設定
-    // CustomTypeで利用する設定と一致させるため、ここでグローバルに設定する
-    let render_config = RenderConfig::default();
-    set_global_render_config(render_config);
-
-    let mut gitconfig_changes = Vec::new();
-
+    config: &Config,
+    render_config: RenderConfig,
+) -> Result<(PathBuf, SignedPublicKey), Error> {
     let public_key = args
         .public_key
         .clone()
@@ -1872,14 +1864,14 @@ fn build_setup_plan(
         fs.read_to_end(&mut buf)?;
         read_public_key(&buf)?
     };
-    let key = GitConfig::combine_section_key(GitConfig::PUBLIC_KEY);
-    gitconfig_changes.push(ConfigChange {
-        old_value: config.get_string(&key).ok(),
-        key,
-        new_value: Some(public_key.to_string_lossy().to_string()),
-    });
+    Ok((public_key, public_key_data))
+}
 
-    // private_keyを取得
+fn resolve_private_key(
+    args: &SetupArguments,
+    config: &Config,
+    render_config: RenderConfig,
+) -> Result<(PathBuf, SignedSecretKey), Error> {
     let private_key = args
         .private_key
         .clone()
@@ -1913,6 +1905,35 @@ fn build_setup_plan(
         fs.read_to_end(&mut buf)?;
         read_secret_key(&buf)?
     };
+    Ok((private_key, private_key_data))
+}
+
+fn build_setup_plan(
+    config: &Config,
+    git_attributes: &[u8],
+    args: &SetupArguments,
+    repo: &GitRepository,
+) -> Result<SetupPlan, Error> {
+    // RenderConfigを設定
+    // CustomTypeで利用する設定と一致させるため、ここでグローバルに設定する
+    let render_config = RenderConfig::default();
+    set_global_render_config(render_config);
+
+    let mut gitconfig_changes = Vec::new();
+
+    // public_keyを取得
+    let (public_key, public_key_data) = resolve_public_key(args, config, render_config)?;
+
+    let key = GitConfig::combine_section_key(GitConfig::PUBLIC_KEY);
+    gitconfig_changes.push(ConfigChange {
+        old_value: config.get_string(&key).ok(),
+        key,
+        new_value: Some(public_key.to_string_lossy().to_string()),
+    });
+
+    // private_keyを取得
+    let (private_key, private_key_data) = resolve_private_key(args, config, render_config)?;
+
     let key = GitConfig::combine_section_key(GitConfig::PRIVATE_KEY);
     gitconfig_changes.push(ConfigChange {
         old_value: config.get_string(&key).ok(),
