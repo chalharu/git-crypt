@@ -1908,17 +1908,11 @@ fn resolve_private_key(
     Ok((private_key, private_key_data))
 }
 
-fn build_setup_plan(
-    config: &Config,
-    git_attributes: &[u8],
+fn build_gitconfig_changes(
     args: &SetupArguments,
-    repo: &GitRepository,
-) -> Result<SetupPlan, Error> {
-    // RenderConfigを設定
-    // CustomTypeで利用する設定と一致させるため、ここでグローバルに設定する
-    let render_config = RenderConfig::default();
-    set_global_render_config(render_config);
-
+    config: &Config,
+    render_config: RenderConfig,
+) -> Result<(Vec<ConfigChange>, PathBuf, PathBuf), Error> {
     let mut gitconfig_changes = Vec::new();
 
     // public_keyを取得
@@ -2041,6 +2035,23 @@ fn build_setup_plan(
         key,
         new_value: encryption_path_regex.clone(),
     });
+
+    Ok((gitconfig_changes, public_key, private_key))
+}
+
+fn build_setup_plan(
+    config: &Config,
+    git_attributes: &[u8],
+    args: &SetupArguments,
+    repo: &GitRepository,
+) -> Result<SetupPlan, Error> {
+    // RenderConfigを設定
+    // CustomTypeで利用する設定と一致させるため、ここでグローバルに設定する
+    let render_config = RenderConfig::default();
+    set_global_render_config(render_config);
+
+    let (gitconfig_changes, public_key, private_key) =
+        build_gitconfig_changes(args, config, render_config)?;
 
     let filter_name = {
         if !args.yes {
