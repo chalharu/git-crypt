@@ -1912,7 +1912,7 @@ fn build_gitconfig_changes(
     args: &SetupArguments,
     config: &Config,
     render_config: RenderConfig,
-) -> Result<(Vec<ConfigChange>, PathBuf, PathBuf), Error> {
+) -> Result<(Vec<ConfigChange>, Vec<PathBuf>), Error> {
     let mut gitconfig_changes = Vec::new();
 
     // public_keyを取得
@@ -2036,14 +2036,13 @@ fn build_gitconfig_changes(
         new_value: encryption_path_regex.clone(),
     });
 
-    Ok((gitconfig_changes, public_key, private_key))
+    Ok((gitconfig_changes, vec![public_key, private_key]))
 }
 
-fn build_gitattributes(
+fn build_gitattributes<P: AsRef<Path>>(
     args: &SetupArguments,
     repo: &GitRepository,
-    public_key: &Path,
-    private_key: &Path,
+    additinal_paths: &[P],
     git_attributes: &[u8],
 ) -> Result<Vec<u8>, Error> {
     // .gitattributesの設定内容を準備
@@ -2073,11 +2072,11 @@ fn build_gitattributes(
         b".gitignore".to_vec(),
         b".gitkeep".to_vec(),
     ];
-    if let Ok(public_key) = relative_git_path(repo, public_key) {
-        special_files.push(public_key.as_os_str().as_bytes().to_vec());
-    }
-    if let Ok(private_key) = relative_git_path(repo, private_key) {
-        special_files.push(private_key.as_os_str().as_bytes().to_vec());
+
+    for path in additinal_paths {
+        if let Ok(relative_path) = relative_git_path(repo, path.as_ref()) {
+            special_files.push(relative_path.as_os_str().as_bytes().to_vec());
+        }
     }
 
     let mut new_gitattributes = Vec::<Vec<u8>>::new();
@@ -2161,12 +2160,9 @@ fn build_setup_plan(
     let render_config = RenderConfig::default();
     set_global_render_config(render_config);
 
-    let (gitconfig_changes, public_key, private_key) =
-        build_gitconfig_changes(args, config, render_config)?;
+    let (gitconfig_changes, keys) = build_gitconfig_changes(args, config, render_config)?;
 
-    let new_gitattributes =
-        build_gitattributes(args, repo, &public_key, &private_key, git_attributes)?;
-
+    let new_gitattributes = build_gitattributes(args, repo, &keys, git_attributes)?;
     Ok(SetupPlan {
         gitconfig_changes,
         gitattributes_old: git_attributes.to_vec(),
