@@ -1815,6 +1815,17 @@ struct SetupPlan {
     gitattributes_new: Vec<u8>,
 }
 
+impl SetupPlan {
+    fn has_changes(&self) -> bool {
+        (!self.gitconfig_changes.is_empty()
+            && self
+                .gitconfig_changes
+                .iter()
+                .any(|c| c.old_value != c.new_value))
+            || self.gitattributes_old != self.gitattributes_new
+    }
+}
+
 fn build_setup_plan(
     config: &Config,
     git_attributes: &[u8],
@@ -2164,8 +2175,6 @@ fn setup(args: SetupArguments) -> Result<(), Error> {
 
     // diff表示
 
-    let mut with_difference = false;
-
     // gitconfigの設定内容を表示
     println!();
     println!("[Git Config Changes]");
@@ -2195,14 +2204,8 @@ fn setup(args: SetupArguments) -> Result<(), Error> {
     .iter_all_changes()
     {
         let (sign, color) = match change.tag() {
-            ChangeTag::Delete => {
-                with_difference = true;
-                ("-", Color::Red)
-            }
-            ChangeTag::Insert => {
-                with_difference = true;
-                ("+", Color::Green)
-            }
+            ChangeTag::Delete => ("-", Color::Red),
+            ChangeTag::Insert => ("+", Color::Green),
             ChangeTag::Equal => (" ", Color::White),
         };
         let out = format!("{} {}", sign, change).color(color);
@@ -2216,14 +2219,8 @@ fn setup(args: SetupArguments) -> Result<(), Error> {
         return Ok(());
     }
 
-    let with_difference = with_difference
-        || setup_plan
-            .gitconfig_changes
-            .iter()
-            .any(|c| c.new_value != c.old_value);
-
     // 変更がある場合のみ適用
-    if with_difference {
+    if setup_plan.has_changes() {
         // ユーザ確認
         if !args.force && !args.yes {
             // 対話モード
