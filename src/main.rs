@@ -1716,6 +1716,17 @@ impl KeyType {
             KeyType::Private => "Private key",
         }
     }
+
+    fn validator<P: AsRef<Path>>(self) -> impl CustomTypeValidator<P> + 'static {
+        move |p: &P| validate_key(p, self)
+    }
+
+    fn config_key(self) -> String {
+        GitConfig::combine_section_key(match self {
+            KeyType::Public => GitConfig::PUBLIC_KEY,
+            KeyType::Private => GitConfig::PRIVATE_KEY,
+        })
+    }
 }
 
 fn validate_key<P: AsRef<Path>>(
@@ -1754,18 +1765,6 @@ fn validate_key<P: AsRef<Path>>(
         ))));
     }
     Ok(Validation::Valid)
-}
-
-fn validate_public_key<P: AsRef<Path>>(
-    p: &P,
-) -> Result<Validation, Box<dyn std::error::Error + Send + Sync + 'static>> {
-    validate_key(p, KeyType::Public)
-}
-
-fn validate_private_key<P: AsRef<Path>>(
-    p: &P,
-) -> Result<Validation, Box<dyn std::error::Error + Send + Sync + 'static>> {
-    validate_key(p, KeyType::Private)
 }
 
 fn validate_encryption_path_regex(
@@ -1856,26 +1855,22 @@ impl SetupPlan {
     }
 }
 
-fn resolve_key<V>(
+fn resolve_key(
     path: &Option<PathBuf>,
-    config_section_key: &str,
     config: &Config,
     yes: bool,
     render_config: RenderConfig,
     key_type: KeyType,
-    validator: V,
-) -> Result<(PathBuf, Vec<u8>), Error>
-where
-    V: CustomTypeValidator<PathBuf> + 'static,
-{
+) -> Result<(PathBuf, Vec<u8>), Error> {
     let key_path = path
         .clone()
-        .or_else(|| {
-            config
-                .get_path(&GitConfig::combine_section_key(config_section_key))
-                .ok()
-        })
-        .filter(|p| validator.validate(p).is_ok_and(|v| v == Validation::Valid));
+        .or_else(|| config.get_path(&key_type.config_key()).ok())
+        .filter(|p| {
+            key_type
+                .validator()
+                .validate(p)
+                .is_ok_and(|v| v == Validation::Valid)
+        });
     let key_path = {
         if !yes {
             // 対話モード
@@ -1884,7 +1879,7 @@ where
                 key_path.clone(),
                 render_config,
             )
-            .with_validator(validator)
+            .with_validator(key_type.validator())
             .prompt()?
         } else {
             // 非対話モード
@@ -1911,12 +1906,10 @@ fn resolve_public_key(
 ) -> Result<(PathBuf, SignedPublicKey), Error> {
     let (public_key_path, public_key_buf) = resolve_key(
         &args.public_key,
-        GitConfig::PUBLIC_KEY,
         config,
         args.yes,
         render_config,
         KeyType::Public,
-        validate_public_key,
     )?;
     let public_key_data = read_public_key(&public_key_buf)?;
     Ok((public_key_path, public_key_data))
@@ -1929,12 +1922,10 @@ fn resolve_private_key(
 ) -> Result<(PathBuf, SignedSecretKey), Error> {
     let (private_key_path, private_key_buf) = resolve_key(
         &args.private_key,
-        GitConfig::PRIVATE_KEY,
         config,
         args.yes,
         render_config,
         KeyType::Private,
-        validate_private_key,
     )?;
     let private_key_data = read_secret_key(&private_key_buf)?;
     Ok((private_key_path, private_key_data))
