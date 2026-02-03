@@ -1,6 +1,6 @@
 use std::{
     cmp,
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     env::current_dir,
     ffi::{OsStr, OsString},
     fs::{self, File},
@@ -2102,7 +2102,7 @@ fn resolve_filter_name(args: &SetupArguments) -> Result<String, Error> {
     Ok(filter_name)
 }
 
-fn strip_filter_attributes(line_buf: &[u8], special_files: &[Vec<u8>]) -> Option<Vec<u8>> {
+fn strip_filter_attributes(line_buf: &[u8], special_files: &BTreeSet<Vec<u8>>) -> Option<Vec<u8>> {
     let line = line_buf.trim_ascii_start();
     if line.is_empty() || line.first() == Some(&b'#') {
         // 空行・コメント行はそのまま追加
@@ -2161,17 +2161,16 @@ fn build_gitattributes<P: AsRef<Path>>(
 
     let filter_name = resolve_filter_name(args)?;
 
-    let mut special_files = vec![
+    let mut special_files = BTreeSet::from([
         b".gitattributes".to_vec(),
         b".gitignore".to_vec(),
         b".gitkeep".to_vec(),
-    ];
-
+    ]);
     for path in additional_paths {
         if let Ok(relative_path) = relative_git_path(repo, path.as_ref())
             && !repo.repo.status_should_ignore(&relative_path)?
         {
-            special_files.push(relative_path.as_os_str().as_bytes().to_vec());
+            special_files.insert(relative_path.as_os_str().as_bytes().to_vec());
         }
     }
 
@@ -2196,10 +2195,9 @@ fn build_gitattributes<P: AsRef<Path>>(
         .to_vec(),
     );
 
-    for special_file in special_files.as_slice() {
-        let mut buf = special_file.clone();
-        buf.extend_from_slice(b" filter= diff= merge=");
-        new_gitattributes.push(buf);
+    for mut special_file in special_files.into_iter() {
+        special_file.extend_from_slice(b" filter= diff= merge=");
+        new_gitattributes.push(special_file);
     }
 
     let new_gitattributes = new_gitattributes.join(&b'\n');
