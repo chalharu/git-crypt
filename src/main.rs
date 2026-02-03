@@ -1,6 +1,6 @@
 use std::{
     cmp,
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     env::current_dir,
     ffi::{OsStr, OsString},
     fs::{self, File},
@@ -1709,6 +1709,15 @@ enum KeyType {
     Private,
 }
 
+impl KeyType {
+    fn as_str(&self) -> &'static str {
+        match self {
+            KeyType::Public => "Public key",
+            KeyType::Private => "Private key",
+        }
+    }
+}
+
 fn validate_key<P: AsRef<Path>>(
     p: &P,
     key_type: KeyType,
@@ -1800,13 +1809,13 @@ struct ConfigChange {
 }
 
 struct ConfigChanges {
-    changes: HashMap<String, (Option<String>, Option<String>)>,
+    changes: BTreeMap<String, (Option<String>, Option<String>)>,
 }
 
 impl ConfigChanges {
     fn new() -> Self {
         ConfigChanges {
-            changes: HashMap::new(),
+            changes: BTreeMap::new(),
         }
     }
 
@@ -1853,7 +1862,7 @@ fn resolve_key<V>(
     config: &Config,
     yes: bool,
     render_config: RenderConfig,
-    key_type: &str,
+    key_type: KeyType,
     validator: V,
 ) -> Result<(PathBuf, Vec<u8>), Error>
 where
@@ -1871,7 +1880,7 @@ where
         if !yes {
             // 対話モード
             InquirePathBuf::new(
-                &format!("{} Path:", key_type),
+                &format!("{} Path:", key_type.as_str()),
                 key_path.clone(),
                 render_config,
             )
@@ -1882,7 +1891,7 @@ where
             match key_path {
                 Some(path) => path.to_path_buf(),
                 None => {
-                    log::error!("Public key path is not specified");
+                    log::error!("{} path is not specified", key_type.as_str());
                     return Err(Error::Setup);
                 }
             }
@@ -1906,7 +1915,7 @@ fn resolve_public_key(
         config,
         args.yes,
         render_config,
-        "Public Key",
+        KeyType::Public,
         validate_public_key,
     )?;
     let public_key_data = read_public_key(&public_key_buf)?;
@@ -1924,7 +1933,7 @@ fn resolve_private_key(
         config,
         args.yes,
         render_config,
-        "Private Key",
+        KeyType::Private,
         validate_private_key,
     )?;
     let private_key_data = read_secret_key(&private_key_buf)?;
