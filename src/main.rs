@@ -2168,7 +2168,9 @@ fn build_gitattributes<P: AsRef<Path>>(
     ];
 
     for path in additional_paths {
-        if let Ok(relative_path) = relative_git_path(repo, path.as_ref()) {
+        if let Ok(relative_path) = relative_git_path(repo, path.as_ref())
+            && repo.repo.status_should_ignore(&relative_path)?
+        {
             special_files.push(relative_path.as_os_str().as_bytes().to_vec());
         }
     }
