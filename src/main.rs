@@ -1931,19 +1931,17 @@ fn resolve_private_key(
     Ok((private_key_path, private_key_data))
 }
 
-fn resolve_encryption_key_id(
-    public_key_data: &SignedPublicKey,
-    private_key_data: &SignedSecretKey,
-    args: &SetupArguments,
-    config: &Config,
-) -> Result<Option<String>, Error> {
-    // encryption_key_idに指定可能なキーID一覧を取得
+// 公開鍵と秘密鍵の両方で利用可能な暗号化キーID一覧を取得
+fn collect_encryption_ids(
+    public_key: &SignedPublicKey,
+    private_key: &SignedSecretKey,
+) -> HashSet<String> {
     let mut public_key_id_list = HashSet::new();
-    if public_key_data.is_encryption_key() {
-        public_key_id_list.insert(public_key_data.key_id());
+    if public_key.is_encryption_key() {
+        public_key_id_list.insert(public_key.key_id());
     }
     public_key_id_list.extend(
-        public_key_data
+        public_key
             .public_subkeys
             .iter()
             .filter(|subkey| subkey.is_encryption_key())
@@ -1951,12 +1949,22 @@ fn resolve_encryption_key_id(
     );
 
     let mut private_key_id_list = HashSet::new();
-    private_key_id_list.insert(private_key_data.key_id());
-    private_key_id_list.extend(private_key_data.secret_subkeys.iter().map(|s| s.key_id()));
-    let encryption_id_list = public_key_id_list
+    private_key_id_list.insert(private_key.key_id());
+    private_key_id_list.extend(private_key.secret_subkeys.iter().map(|s| s.key_id()));
+    public_key_id_list
         .intersection(&private_key_id_list)
         .map(|s| s.to_string())
-        .collect::<HashSet<_>>();
+        .collect::<HashSet<_>>()
+}
+
+fn resolve_encryption_key_id(
+    public_key_data: &SignedPublicKey,
+    private_key_data: &SignedSecretKey,
+    args: &SetupArguments,
+    config: &Config,
+) -> Result<Option<String>, Error> {
+    // encryption_key_idに指定可能なキーID一覧を取得
+    let encryption_id_list = collect_encryption_ids(public_key_data, private_key_data);
 
     if encryption_id_list.is_empty() {
         log::error!("No encryption subkey found in the provided keys");
