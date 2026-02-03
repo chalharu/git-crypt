@@ -2047,40 +2047,33 @@ fn build_gitconfig_changes(
     // public_keyを取得
     let (public_key, public_key_data) = resolve_public_key(args, config, render_config)?;
 
-    let key = GitConfig::combine_section_key(GitConfig::PUBLIC_KEY);
-    gitconfig_changes.push(ConfigChange {
-        old_value: config.get_string(&key).ok(),
-        key,
-        new_value: Some(public_key.to_string_lossy().to_string()),
-    });
-
     // private_keyを取得
     let (private_key, private_key_data) = resolve_private_key(args, config, render_config)?;
-
-    let key = GitConfig::combine_section_key(GitConfig::PRIVATE_KEY);
-    gitconfig_changes.push(ConfigChange {
-        old_value: config.get_string(&key).ok(),
-        key,
-        new_value: Some(private_key.to_string_lossy().to_string()),
-    });
 
     let encryption_key_id =
         resolve_encryption_key_id(&public_key_data, &private_key_data, args, config)?;
 
-    let key = GitConfig::combine_section_key(GitConfig::ENCRYPTION_KEY_ID);
-    gitconfig_changes.push(ConfigChange {
-        old_value: config.get_string(&key).ok(),
-        key,
-        new_value: encryption_key_id,
-    });
-
     let encryption_path_regex = resolve_encryption_path_regex(args, config, render_config)?;
-    let key = GitConfig::combine_section_key(GitConfig::ENCRYPTION_PATH_REGEX);
-    gitconfig_changes.push(ConfigChange {
-        old_value: config.get_string(&key).ok(),
-        key,
-        new_value: encryption_path_regex,
-    });
+
+    for (k, v) in [
+        (
+            GitConfig::PUBLIC_KEY,
+            Some(public_key.to_string_lossy().to_string()),
+        ),
+        (
+            GitConfig::PRIVATE_KEY,
+            Some(private_key.to_string_lossy().to_string()),
+        ),
+        (GitConfig::ENCRYPTION_KEY_ID, encryption_key_id),
+        (GitConfig::ENCRYPTION_PATH_REGEX, encryption_path_regex),
+    ] {
+        let key = GitConfig::combine_section_key(k);
+        gitconfig_changes.push(ConfigChange {
+            old_value: config.get_string(&key).ok(),
+            key,
+            new_value: v,
+        });
+    }
 
     Ok((gitconfig_changes, vec![public_key, private_key]))
 }
