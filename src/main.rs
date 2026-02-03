@@ -36,6 +36,9 @@ use pgp::{
 use regex::bytes::Regex;
 use similar::ChangeTag;
 
+#[cfg(test)]
+mod tests;
+
 #[derive(Parser, Clone, Debug)]
 struct Cli {
     /// デバッグトレース出力を有効化
@@ -583,6 +586,12 @@ impl GitRepository {
     }
 }
 
+impl From<git2::Repository> for GitRepository {
+    fn from(repo: git2::Repository) -> Self {
+        GitRepository { repo }
+    }
+}
+
 fn clean(path: &OsStr) -> Result<(), Error> {
     let mut context = Context::new()?;
     context.encrypt_io(
@@ -602,6 +611,10 @@ struct Context {
 impl Context {
     fn new() -> Result<Self, Error> {
         let repo = GitRepository::new()?;
+        Self::with_repo(repo)
+    }
+
+    fn with_repo(repo: GitRepository) -> Result<Self, Error> {
         let config = GitConfig::load(&repo)?;
         let keypair = KeyPair::try_from(&config)?;
         let encryption_policy = EncryptionPolicy::new(Rc::new(config));
@@ -634,6 +647,10 @@ impl Context {
         let encrypted = encrypt(self, blob_oid, path)?;
         self.repo.copy_oid_to_writer(encrypted, writer)?;
         Ok(())
+    }
+
+    fn repo(&self) -> &GitRepository {
+        &self.repo
     }
 }
 
