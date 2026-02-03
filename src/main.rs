@@ -2102,6 +2102,48 @@ fn resolve_filter_name(args: &SetupArguments) -> Result<String, Error> {
     Ok(filter_name)
 }
 
+fn strip_filter_attributes(line_buf: &[u8], special_files: &[Vec<u8>]) -> Option<Vec<u8>> {
+    let line = line_buf.trim_ascii_start();
+    if line.is_empty() || line.first() == Some(&b'#') {
+        // 空行・コメント行はそのまま追加
+        return Some(line_buf.to_vec());
+    }
+    // 一度既存設定を全て削除
+    let buf = line
+        .split(|&b| b.is_ascii_whitespace())
+        .filter(|v| !v.is_empty())
+        .collect::<Vec<_>>();
+    if buf.first() != Some(&b"*".as_slice())
+        && !special_files
+            .iter()
+            .any(|f| Some(&f.as_slice()) == buf.first())
+    {
+        // `*` または 特殊ファイル以外のパス指定の場合はそのまま追加
+        return Some(line_buf.to_vec());
+    }
+    let len = buf.len();
+    let buf = buf
+        .into_iter()
+        .filter(|attr| {
+            !attr.starts_with(b"filter=")
+                && !attr.starts_with(b"diff=")
+                && !attr.starts_with(b"merge=")
+        })
+        .collect::<Vec<_>>();
+    if buf.len() < len {
+        // 属性の一部が削除された場合は更新
+        if buf.len() <= 1 {
+            // 属性が1つ以下になった場合はスキップ
+            None
+        } else {
+            Some(buf.join(&b' '))
+        }
+    } else {
+        // 変更なし
+        Some(line_buf.to_vec())
+    }
+}
+
 fn build_gitattributes<P: AsRef<Path>>(
     args: &SetupArguments,
     repo: &GitRepository,
@@ -2131,49 +2173,10 @@ fn build_gitattributes<P: AsRef<Path>>(
         }
     }
 
-    let mut new_gitattributes = Vec::<Vec<u8>>::new();
-    for line_buf in git_attributes.split(|&b| b == b'\n') {
-        let line = line_buf.trim_ascii_start();
-        if line.is_empty() || line.first() == Some(&b'#') {
-            // 空行・コメント行はそのまま追加
-            new_gitattributes.push(line_buf.to_vec());
-            continue;
-        }
-        // 一度既存設定を全て削除
-        let buf = line
-            .split(|&b| b.is_ascii_whitespace())
-            .filter(|v| !v.is_empty())
-            .collect::<Vec<_>>();
-        if buf.first() != Some(&b"*".as_slice())
-            && !special_files
-                .iter()
-                .any(|f| Some(&f.as_slice()) == buf.first())
-        {
-            // `*` または 特殊ファイル以外のパス指定の場合はそのまま追加
-            new_gitattributes.push(line_buf.to_vec());
-            continue;
-        }
-        let len = buf.len();
-        let buf = buf
-            .into_iter()
-            .filter(|attr| {
-                !attr.starts_with(b"filter=")
-                    && !attr.starts_with(b"diff=")
-                    && !attr.starts_with(b"merge=")
-            })
-            .collect::<Vec<_>>();
-        if buf.len() < len {
-            // 属性の一部が削除された場合は更新
-            if buf.len() <= 1 {
-                // 属性が1つ以下になった場合はスキップ
-                continue;
-            }
-            new_gitattributes.push(buf.join(&b' '));
-        } else {
-            // 変更なし
-            new_gitattributes.push(line_buf.to_vec());
-        }
-    }
+    let mut new_gitattributes = git_attributes
+        .split(|&b| b == b'\n')
+        .filter_map(|l| strip_filter_attributes(l, &special_files))
+        .collect::<Vec<_>>();
 
     if new_gitattributes.iter().all(|line| line.is_empty()) {
         // 全ての行が空行の場合はクリア
