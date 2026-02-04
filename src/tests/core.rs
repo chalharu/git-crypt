@@ -6,7 +6,7 @@ use crate::{encrypt, tests::util::TestRepository};
 // When: encrypt()
 // Then: 返るOIDが入力OIDと同一
 #[test]
-fn 暗号化対象外は素通し() {
+fn encrypt_暗号化対象外は素通し() {
     let mut repo = TestRepository::new();
     let input_path = PathBuf::from_str("docs/readme.md").unwrap();
     let input_oid = repo.context().repo.repo.blob(b"Hello, World!").unwrap();
