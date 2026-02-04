@@ -1,5 +1,3 @@
-use std::path::Path;
-
 use git2::Repository;
 use pgp::{composed::SecretKeyParamsBuilder, ser::Serialize};
 use rand::thread_rng;
@@ -8,7 +6,7 @@ use tempfile::TempDir;
 use crate::{Context, GitConfig, GitRepository};
 
 pub struct TestRepository {
-    tempdir: TempDir,
+    _tempdir: TempDir,
     context: Context,
 }
 
@@ -52,15 +50,17 @@ impl TestRepository {
                 private_key_path.to_str().unwrap(),
             )
             .unwrap();
+        config
+            .set_str(
+                &GitConfig::combine_section_key(GitConfig::ENCRYPTION_PATH_REGEX),
+                "^src/",
+            )
+            .unwrap();
 
         Self {
-            tempdir,
+            _tempdir: tempdir,
             context: Context::with_repo(GitRepository { repo }).unwrap(),
         }
-    }
-
-    pub fn path(&self) -> &Path {
-        self.tempdir.path()
     }
 
     pub fn context(&self) -> &Context {

@@ -27,10 +27,10 @@ use inquire::{
 use pgp::{
     composed::{
         ArmorOptions, DecryptionOptions, Deserializable as _, Esk, Message, MessageBuilder,
-        SignedPublicKey, SignedSecretKey, TheRing,
+        SignedPublicKey, SignedPublicSubKey, SignedSecretKey, TheRing,
     },
     crypto::sym::SymmetricKeyAlgorithm,
-    types::{CompressionAlgorithm, KeyDetails, PublicKeyTrait},
+    types::{CompressionAlgorithm, KeyDetails as _, PublicKeyTrait},
 };
 use regex::bytes::Regex;
 use similar::ChangeTag;
@@ -607,6 +607,12 @@ struct Context {
     encryption_policy: EncryptionPolicy,
 }
 
+#[derive(Debug)]
+enum PublicKey {
+    SignedPublicKey(SignedPublicKey),
+    SignedPublicSubKey(SignedPublicSubKey),
+}
+
 impl Context {
     fn new() -> Result<Self, Error> {
         let repo = GitRepository::new()?;
@@ -650,6 +656,44 @@ impl Context {
 
     fn repo(&self) -> &GitRepository {
         &self.repo
+    }
+
+    // K: crate::types::PublicKeyTrait
+    fn find_public_key_by_id(&self, key_id: Option<&[u8]>) -> Option<PublicKey> {
+        if let Some(key_id) = key_id {
+            // 指定されたキーIDに一致するサブキーを探す
+            if self.keypair.public_key.key_id().as_ref() == key_id
+                && self.keypair.public_key.is_encryption_key()
+            {
+                // 主キーが一致する場合
+                return Some(PublicKey::SignedPublicKey(self.keypair.public_key.clone()));
+            }
+            self.keypair
+                .public_key
+                .public_subkeys
+                .iter()
+                .find(|subkey| {
+                    subkey.is_encryption_key()
+                        && subkey
+                            .as_unsigned()
+                            .key_id()
+                            .as_ref()
+                            .iter()
+                            .eq(key_id.iter())
+                })
+                .map(|k| PublicKey::SignedPublicSubKey(k.clone()))
+        } else {
+            if self.keypair.public_key.is_encryption_key() {
+                // 主キーが暗号化キーの場合
+                return Some(PublicKey::SignedPublicKey(self.keypair.public_key.clone()));
+            }
+            self.keypair
+                .public_key
+                .public_subkeys
+                .iter()
+                .find(|subkey| subkey.is_encryption_key())
+                .map(|k| PublicKey::SignedPublicSubKey(k.clone()))
+        }
     }
 }
 
@@ -785,6 +829,71 @@ trait IteratorExt: Iterator + Sized {
 }
 impl<I: Iterator> IteratorExt for I {}
 
+impl pgp::types::KeyDetails for PublicKey {
+    fn version(&self) -> pgp::types::KeyVersion {
+        match self {
+            PublicKey::SignedPublicKey(i) => i.version(),
+            PublicKey::SignedPublicSubKey(i) => i.version(),
+        }
+    }
+
+    fn fingerprint(&self) -> pgp::types::Fingerprint {
+        match self {
+            PublicKey::SignedPublicKey(i) => i.fingerprint(),
+            PublicKey::SignedPublicSubKey(i) => i.fingerprint(),
+        }
+    }
+
+    fn key_id(&self) -> pgp::types::KeyId {
+        match self {
+            PublicKey::SignedPublicKey(i) => i.key_id(),
+            PublicKey::SignedPublicSubKey(i) => i.key_id(),
+        }
+    }
+
+    fn algorithm(&self) -> pgp::crypto::public_key::PublicKeyAlgorithm {
+        match self {
+            PublicKey::SignedPublicKey(i) => i.algorithm(),
+            PublicKey::SignedPublicSubKey(i) => i.algorithm(),
+        }
+    }
+}
+
+impl PublicKeyTrait for PublicKey {
+    fn created_at(&self) -> &chrono::DateTime<chrono::Utc> {
+        match self {
+            PublicKey::SignedPublicKey(i) => i.created_at(),
+            PublicKey::SignedPublicSubKey(i) => i.created_at(),
+        }
+    }
+
+    fn expiration(&self) -> Option<u16> {
+        match self {
+            PublicKey::SignedPublicKey(i) => i.expiration(),
+            PublicKey::SignedPublicSubKey(i) => i.expiration(),
+        }
+    }
+
+    fn verify_signature(
+        &self,
+        hash: pgp::crypto::hash::HashAlgorithm,
+        data: &[u8],
+        sig: &pgp::types::SignatureBytes,
+    ) -> pgp::errors::Result<()> {
+        match self {
+            PublicKey::SignedPublicKey(i) => i.verify_signature(hash, data, sig),
+            PublicKey::SignedPublicSubKey(i) => i.verify_signature(hash, data, sig),
+        }
+    }
+
+    fn public_params(&self) -> &pgp::types::PublicParams {
+        match self {
+            PublicKey::SignedPublicKey(i) => i.public_params(),
+            PublicKey::SignedPublicSubKey(i) => i.public_params(),
+        }
+    }
+}
+
 fn encrypt<'a, T: 'a + ToPath<'a>>(context: &mut Context, oid: Oid, path: T) -> Result<Oid, Error> {
     if !context
         .encryption_policy
@@ -854,41 +963,19 @@ fn encrypt<'a, T: 'a + ToPath<'a>>(context: &mut Context, oid: Oid, path: T) -> 
     }
 
     // ファイルを暗号化して出力
-    let encryption_subkey =
-        if let Some(key_id) = context.encryption_policy.configured_key_id_bytes()? {
-            // 指定されたキーIDに一致するサブキーを探す
-            context
-                .keypair
-                .public_key
-                .public_subkeys
-                .iter()
-                .find(|subkey| {
-                    subkey.is_encryption_key()
-                        && subkey
-                            .as_unsigned()
-                            .key_id()
-                            .as_ref()
-                            .iter()
-                            .eq(key_id.iter())
-                })
-        } else {
-            context
-                .keypair
-                .public_key
-                .public_subkeys
-                .iter()
-                .find(|subkey| subkey.is_encryption_key())
-        };
-    let encryption_subkey = match encryption_subkey {
-        Some(key) => key,
-        None => return Err(Error::InvalidEncryptionSubkey),
+    let kid = context
+        .encryption_policy
+        .configured_key_id_bytes()?
+        .map(|k| k.to_vec());
+    let Some(encryption_key) = context.find_public_key_by_id(kid.as_deref()) else {
+        return Err(Error::InvalidEncryptionSubkey);
     };
 
     let reader = oid_reader(&odb, oid)?;
     let mut builder = MessageBuilder::from_reader("", reader)
         .seipd_v1(rand::thread_rng(), SymmetricKeyAlgorithm::AES256);
     builder.compression(CompressionAlgorithm::ZLIB);
-    builder.encrypt_to_key(rand::thread_rng(), &encryption_subkey)?;
+    builder.encrypt_to_key(rand::thread_rng(), &encryption_key)?;
 
     let mut writer = context.repo.repo.blob_writer(None)?;
     builder.to_armored_writer(rand::thread_rng(), ArmorOptions::default(), &mut writer)?;
