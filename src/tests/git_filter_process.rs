@@ -54,11 +54,11 @@ fn git_filter_process_異常ハンドシェイク_version不正() {
 #[test]
 fn git_filter_process_unknown_command() {
     // capabilityは何も指定しない
-    let reader = b"0016git-filter-client\n000eversion=2\n000000000010unknown-cmd\n0000".as_slice();
+    let reader = b"0016git-filter-client\n000eversion=2\n00000015capability=clean\n00000018command=unknown-cmd\n0000".as_slice();
     let mut writer = Vec::new();
     let mut process = PktLineProcess::with_pkt_io(PktLineIO::with_rw(reader, &mut writer)).unwrap();
     process.process().unwrap();
-    let expected_output = b"0016git-filter-server\n000eversion=2\n000000000011status=error\n0000";
+    let expected_output = b"0016git-filter-server\n000eversion=2\n00000015capability=clean\n00000011status=error\n0000";
     drop(process);
     assert_eq!(writer.as_slice(), expected_output);
 }
