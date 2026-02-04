@@ -84,7 +84,69 @@ fn encrypt_暗号化対象外は素通し() {
     assert_eq!(input_oid, output_oid);
 }
 
-// キー不一致の復号は素通し
+// キーID不一致の復号は素通し
+// Given: 暗号化済みOID
+// When: decrypt() を別キーIDで実行(秘密鍵は持っている)
+// Then: 返るOIDが入力OIDと同一
+#[test]
+#[allow(non_snake_case)]
+fn decrypt_キーID不一致の復号は素通し() {
+    let keypair = generate_keypair();
+    let mut repo_encrypt = TestRepositoryBuilder::new()
+        .with_private_key_data(keypair.0.clone())
+        .with_public_key_data(keypair.1.clone())
+        .build();
+    let input_path = PathBuf::from_str("src/a.txt").unwrap();
+    let input_content = b"hello\n";
+    let input_oid = repo_encrypt
+        .context()
+        .repo
+        .repo
+        .blob(input_content)
+        .unwrap();
+    let encrypted_oid = encrypt(
+        repo_encrypt.context_mut(),
+        input_oid,
+        input_path.as_os_str(),
+    )
+    .unwrap();
+
+    let mut repo_decrypt = TestRepositoryBuilder::new()
+        .with_private_key_data(keypair.0.clone())
+        .with_public_key_data(keypair.1.clone())
+        .with_encryption_key_id("DEADBEAF".into()) // 適当なキーID
+        .build();
+    let output_oid = decrypt(
+        repo_decrypt.context_mut(),
+        encrypted_oid,
+        input_path.as_os_str().as_encoded_bytes(),
+    )
+    .unwrap();
+    assert_eq!(encrypted_oid, output_oid);
+}
+
+// 破損PGPは素通し
+// Given: 破損PGPデータ
+// When: decrypt()
+// Then: 返るOIDが入力OIDと同一
+#[test]
+#[allow(non_snake_case)]
+fn decrypt_破損PGPは素通し() {
+    let mut repo = TestRepositoryBuilder::new().build();
+    let input_path = PathBuf::from_str("src/a.txt").unwrap();
+    let corrupt_pgp_data =
+        b"-----BEGIN PGP MESSAGE-----\ncorrupt data\n-----END PGP MESSAGE-----\n";
+    let input_oid = repo.context().repo.repo.blob(corrupt_pgp_data).unwrap();
+    let output_oid = decrypt(
+        repo.context_mut(),
+        input_oid,
+        input_path.as_os_str().as_encoded_bytes(),
+    )
+    .unwrap();
+    assert_eq!(input_oid, output_oid);
+}
+
+// MissingKeyは素通し
 // Given: 公開鍵Aで暗号化したデータ, 秘密鍵Bのみ
 // When: decrypt()
 // Then: 返るOIDが入力OIDと同一

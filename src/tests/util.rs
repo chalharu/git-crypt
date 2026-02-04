@@ -9,6 +9,7 @@ pub struct TestRepositoryBuilder {
     private_key_data: Option<Vec<u8>>,
     public_key_data: Option<Vec<u8>>,
     encryption_path_regex: Option<String>,
+    encryption_key_id: Option<String>,
 }
 
 impl TestRepositoryBuilder {
@@ -17,6 +18,7 @@ impl TestRepositoryBuilder {
             private_key_data: None,
             public_key_data: None,
             encryption_path_regex: None,
+            encryption_key_id: None,
         }
     }
 
@@ -32,6 +34,11 @@ impl TestRepositoryBuilder {
 
     pub fn with_encryption_path_regex(mut self, regex: String) -> Self {
         self.encryption_path_regex = Some(regex);
+        self
+    }
+
+    pub fn with_encryption_key_id(mut self, key_id: String) -> Self {
+        self.encryption_key_id = Some(key_id);
         self
     }
 
@@ -68,6 +75,14 @@ impl TestRepositoryBuilder {
                 .set_str(
                     &GitConfig::combine_section_key(GitConfig::ENCRYPTION_PATH_REGEX),
                     &regex,
+                )
+                .unwrap();
+        }
+        if let Some(key_id) = self.encryption_key_id {
+            config
+                .set_str(
+                    &GitConfig::combine_section_key(GitConfig::ENCRYPTION_KEY_ID),
+                    &key_id,
                 )
                 .unwrap();
         }
