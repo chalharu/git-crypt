@@ -654,11 +654,6 @@ impl Context {
         Ok(())
     }
 
-    fn repo(&self) -> &GitRepository {
-        &self.repo
-    }
-
-    // K: crate::types::PublicKeyTrait
     fn find_public_key_by_id(&self, key_id: Option<&[u8]>) -> Option<PublicKey> {
         if let Some(key_id) = key_id {
             // 指定されたキーIDに一致するサブキーを探す
