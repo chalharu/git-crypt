@@ -7,7 +7,6 @@ use std::{
     io::{
         self, BufRead, BufReader, BufWriter, ErrorKind, Read, Seek, StdinLock, StdoutLock, Write,
     },
-    os::unix::ffi::OsStrExt,
     path::{self, Path, PathBuf},
     rc::Rc,
     str::FromStr,
