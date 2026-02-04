@@ -34,28 +34,22 @@ impl TestRepository {
 
         let signed_public_key = signed_private_key.signed_public_key();
 
-        std::fs::write(
-            tempdir.path().join("private.gpg"),
-            signed_private_key.to_bytes().unwrap(),
-        )
-        .unwrap();
-        std::fs::write(
-            tempdir.path().join("public.gpg"),
-            signed_public_key.to_bytes().unwrap(),
-        )
-        .unwrap();
+        let private_key_path = tempdir.path().join("private.gpg");
+        let public_key_path = tempdir.path().join("public.gpg");
+        std::fs::write(&private_key_path, signed_private_key.to_bytes().unwrap()).unwrap();
+        std::fs::write(&public_key_path, signed_public_key.to_bytes().unwrap()).unwrap();
 
         let mut config = repo.config().unwrap();
         config
             .set_str(
                 &GitConfig::combine_section_key(GitConfig::PUBLIC_KEY),
-                "public.gpg",
+                public_key_path.to_str().unwrap(),
             )
             .unwrap();
         config
             .set_str(
                 &GitConfig::combine_section_key(GitConfig::PRIVATE_KEY),
-                "private.gpg",
+                private_key_path.to_str().unwrap(),
             )
             .unwrap();
 
