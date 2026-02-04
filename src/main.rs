@@ -1331,9 +1331,9 @@ fn merge(
     Ok(result.is_automergeable())
 }
 
-struct PktLineIO {
-    reader: BufReader<StdinLock<'static>>,
-    writer: BufWriter<StdoutLock<'static>>,
+struct PktLineIO<R: Read, W: Write> {
+    reader: BufReader<R>,
+    writer: BufWriter<W>,
 }
 
 enum PktLineReadResult {
@@ -1393,11 +1393,16 @@ impl PktLineTextResult {
     }
 }
 
-impl PktLineIO {
+impl PktLineIO<StdinLock<'static>, StdoutLock<'static>> {
     fn new() -> Self {
         let reader = std::io::stdin().lock();
         let writer = std::io::stdout().lock();
+        Self::with_rw(reader, writer)
+    }
+}
 
+impl<R: Read, W: Write> PktLineIO<R, W> {
+    fn with_rw(reader: R, writer: W) -> Self {
         let bufreader = BufReader::new(reader);
         let bufwriter = BufWriter::new(writer);
 
@@ -1429,7 +1434,7 @@ impl PktLineIO {
         }
     }
 
-    fn write_pkt_content_with_reader<R: Read>(&mut self, mut data: R) -> Result<(), Error> {
+    fn write_pkt_content_with_reader<RR: Read>(&mut self, mut data: RR) -> Result<(), Error> {
         self.write_pkt_string("status=success")?;
         self.write_flush_pkt()?;
 
@@ -1502,7 +1507,7 @@ impl PktLineIO {
         Ok(PktLineReadResult::Packet(data_buf))
     }
 
-    fn read_pkt_line_as_reader(&mut self) -> Result<PktContentReader<'_>, Error> {
+    fn read_pkt_line_as_reader(&mut self) -> Result<PktContentReader<'_, R, W>, Error> {
         Ok(PktContentReader::new(self))
     }
 
@@ -1511,14 +1516,14 @@ impl PktLineIO {
     }
 }
 
-struct PktContentReader<'a> {
-    pkt_io: &'a mut PktLineIO,
+struct PktContentReader<'a, R: Read, W: Write> {
+    pkt_io: &'a mut PktLineIO<R, W>,
     finished: bool,
     buffer: Vec<u8>,
 }
 
-impl<'a> PktContentReader<'a> {
-    fn new(pkt_io: &'a mut PktLineIO) -> Self {
+impl<'a, R: Read, W: Write> PktContentReader<'a, R, W> {
+    fn new(pkt_io: &'a mut PktLineIO<R, W>) -> Self {
         PktContentReader {
             pkt_io,
             finished: false,
@@ -1552,7 +1557,7 @@ impl<'a> PktContentReader<'a> {
     }
 }
 
-impl Read for PktContentReader<'_> {
+impl<R: Read, W: Write> Read for PktContentReader<'_, R, W> {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, io::Error> {
         match self.read_inner(buf) {
             Ok(n) => Ok(n),
@@ -1562,9 +1567,9 @@ impl Read for PktContentReader<'_> {
     }
 }
 
-struct PktLineProcess {
+struct PktLineProcess<R: Read, W: Write> {
     context: Context,
-    pkt_io: PktLineIO,
+    pkt_io: PktLineIO<R, W>,
 }
 
 #[derive(Clone, Copy)]
@@ -1573,10 +1578,16 @@ enum ProcessCommand {
     Smudge,
 }
 
-impl PktLineProcess {
+impl PktLineProcess<StdinLock<'static>, StdoutLock<'static>> {
     fn new() -> Result<Self, Error> {
+        Self::with_pkt_io(PktLineIO::new())
+    }
+}
+
+impl<R: Read, W: Write> PktLineProcess<R, W> {
+    fn with_pkt_io(pkt_io: PktLineIO<R, W>) -> Result<Self, Error> {
         Ok(PktLineProcess {
-            pkt_io: PktLineIO::new(),
+            pkt_io,
             context: Context::new()?,
         })
     }
