@@ -4,9 +4,7 @@ use std::{
     env::current_dir,
     ffi::{OsStr, OsString},
     fs::{self, File},
-    io::{
-        self, BufRead, BufReader, BufWriter, ErrorKind, Read, Seek, StdinLock, StdoutLock, Write,
-    },
+    io::{self, BufRead, BufReader, BufWriter, ErrorKind, Read, Seek, Write},
     path::{self, Path, PathBuf},
     rc::Rc,
     str::FromStr,
@@ -256,20 +254,28 @@ fn main() {
 
     match cli.command {
         Commands::Clean { file_path } => {
-            if let Err(e) = clean(&file_path) {
+            if let Err(e) = clean(
+                &mut std::io::stdin().lock(),
+                &mut std::io::stdout().lock(),
+                &file_path,
+            ) {
                 log::error!("Error during clean: {}", e);
                 std::process::exit(1);
             }
         }
         Commands::Smudge { file_path } => {
-            if let Err(e) = smudge(&file_path) {
+            if let Err(e) = smudge(
+                &mut std::io::stdin().lock(),
+                &mut std::io::stdout().lock(),
+                &file_path,
+            ) {
                 log::error!("Error during smudge: {:?}", e);
                 std::process::exit(1);
             }
         }
         Commands::Textconv { file_path } => {
             log::debug!("Textconv for file: {:?}", file_path);
-            if let Err(e) = textconv(&normalize_path(file_path)) {
+            if let Err(e) = textconv(&mut std::io::stdout().lock(), &normalize_path(file_path)) {
                 log::error!("Error during textconv: {}", e);
                 std::process::exit(1);
             }
@@ -308,13 +314,14 @@ fn main() {
             }
         }
         Commands::Process => {
-            let mut processor = match PktLineProcess::new() {
-                Ok(p) => p,
-                Err(e) => {
-                    log::error!("Error during initialization: {}", e);
-                    std::process::exit(1);
-                }
-            };
+            let mut processor =
+                match PktLineProcess::with_rw(std::io::stdin().lock(), std::io::stdout().lock()) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        log::error!("Error during initialization: {}", e);
+                        std::process::exit(1);
+                    }
+                };
 
             if let Err(e) = processor.process() {
                 log::error!("Error during process: {}", e);
@@ -591,13 +598,9 @@ impl From<git2::Repository> for GitRepository {
     }
 }
 
-fn clean(path: &OsStr) -> Result<(), Error> {
+fn clean<R: Read, W: Write>(read: &mut R, write: &mut W, path: &OsStr) -> Result<(), Error> {
     let mut context = Context::new()?;
-    context.encrypt_io(
-        &mut std::io::stdin().lock(),
-        path,
-        &mut std::io::stdout().lock(),
-    )?;
+    context.encrypt_io(read, path, write)?;
     Ok(())
 }
 
@@ -692,13 +695,9 @@ impl Context {
     }
 }
 
-fn smudge(path: &OsStr) -> Result<(), Error> {
+fn smudge<R: Read, W: Write>(read: &mut R, write: &mut W, path: &OsStr) -> Result<(), Error> {
     let mut context = Context::new()?;
-    context.decrypt_io(
-        &mut std::io::stdin().lock(),
-        path.as_encoded_bytes(),
-        &mut std::io::stdout().lock(),
-    )?;
+    context.decrypt_io(read, path.as_encoded_bytes(), write)?;
     Ok(())
 }
 
@@ -1067,13 +1066,13 @@ fn decrypt(context: &mut Context, data: Oid, path: &[u8]) -> Result<Oid, Error> 
     Ok(decrypt_obj_oid)
 }
 
-fn textconv(path: &Path) -> Result<(), Error> {
+fn textconv<W: Write>(write: &mut W, path: &Path) -> Result<(), Error> {
     let mut context = Context::new()?;
 
     context.decrypt_io(
         &mut fs::OpenOptions::new().read(true).open(path)?,
         &[],
-        &mut std::io::stdout().lock(),
+        write,
     )?;
     Ok(())
 }
@@ -1393,14 +1392,6 @@ impl PktLineTextResult {
     }
 }
 
-impl PktLineIO<StdinLock<'static>, StdoutLock<'static>> {
-    fn new() -> Self {
-        let reader = std::io::stdin().lock();
-        let writer = std::io::stdout().lock();
-        Self::with_rw(reader, writer)
-    }
-}
-
 impl<R: Read, W: Write> PktLineIO<R, W> {
     fn with_rw(reader: R, writer: W) -> Self {
         let bufreader = BufReader::new(reader);
@@ -1578,13 +1569,11 @@ enum ProcessCommand {
     Smudge,
 }
 
-impl PktLineProcess<StdinLock<'static>, StdoutLock<'static>> {
-    fn new() -> Result<Self, Error> {
-        Self::with_pkt_io(PktLineIO::new())
-    }
-}
-
 impl<R: Read, W: Write> PktLineProcess<R, W> {
+    fn with_rw(reader: R, writer: W) -> Result<Self, Error> {
+        Self::with_pkt_io(PktLineIO::with_rw(reader, writer))
+    }
+
     fn with_pkt_io(pkt_io: PktLineIO<R, W>) -> Result<Self, Error> {
         Ok(PktLineProcess {
             pkt_io,
