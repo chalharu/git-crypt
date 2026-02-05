@@ -26,7 +26,7 @@ fn encryption_policy_regex未設定() {
     let path = PathBuf::from_str("any/file.txt").unwrap();
     assert!(
         policy
-            .should_encrypt_file_path(&path.as_os_str().as_encoded_bytes())
+            .should_encrypt_file_path(path.as_os_str().as_encoded_bytes())
             .unwrap()
     );
 }
@@ -48,12 +48,12 @@ fn encryption_policy_regex一致不一致() {
     let path_not_match = PathBuf::from_str("docs/readme.md").unwrap();
     assert!(
         policy
-            .should_encrypt_file_path(&path_match.as_os_str().as_encoded_bytes())
+            .should_encrypt_file_path(path_match.as_os_str().as_encoded_bytes())
             .unwrap()
     );
     assert!(
         !policy
-            .should_encrypt_file_path(&path_not_match.as_os_str().as_encoded_bytes())
+            .should_encrypt_file_path(path_not_match.as_os_str().as_encoded_bytes())
             .unwrap()
     );
 }
