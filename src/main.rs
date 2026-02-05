@@ -252,12 +252,21 @@ fn main() {
         std::process::exit(1);
     }
 
+    let current_dir = match current_dir() {
+        Ok(dir) => dir,
+        Err(e) => {
+            log::error!("Failed to get current directory: {}", e);
+            std::process::exit(1);
+        }
+    };
+
     match cli.command {
         Commands::Clean { file_path } => {
             if let Err(e) = clean(
                 &mut std::io::stdin().lock(),
                 &mut std::io::stdout().lock(),
                 &file_path,
+                current_dir,
             ) {
                 log::error!("Error during clean: {}", e);
                 std::process::exit(1);
@@ -268,6 +277,7 @@ fn main() {
                 &mut std::io::stdin().lock(),
                 &mut std::io::stdout().lock(),
                 &file_path,
+                current_dir,
             ) {
                 log::error!("Error during smudge: {:?}", e);
                 std::process::exit(1);
@@ -275,7 +285,11 @@ fn main() {
         }
         Commands::Textconv { file_path } => {
             log::debug!("Textconv for file: {:?}", file_path);
-            if let Err(e) = textconv(&mut std::io::stdout().lock(), &normalize_path(file_path)) {
+            if let Err(e) = textconv(
+                &mut std::io::stdout().lock(),
+                normalize_path(file_path),
+                current_dir,
+            ) {
                 log::error!("Error during textconv: {}", e);
                 std::process::exit(1);
             }
@@ -568,7 +582,11 @@ struct GitRepository {
 
 impl GitRepository {
     fn new() -> Result<Self, Error> {
-        let repo = git2::Repository::open(current_dir()?)?;
+        Self::from_path(current_dir()?)
+    }
+
+    fn from_path<P: AsRef<Path>>(path: P) -> Result<Self, Error> {
+        let repo = git2::Repository::open(path)?;
         Ok(GitRepository { repo })
     }
 
@@ -598,8 +616,14 @@ impl From<git2::Repository> for GitRepository {
     }
 }
 
-fn clean<R: Read, W: Write>(read: &mut R, write: &mut W, path: &OsStr) -> Result<(), Error> {
-    let mut context = Context::new()?;
+fn clean<R: Read, W: Write, P: AsRef<Path>>(
+    read: &mut R,
+    write: &mut W,
+    path: &OsStr,
+    repo_path: P,
+) -> Result<(), Error> {
+    let repo = GitRepository::from_path(repo_path)?;
+    let mut context = Context::with_repo(repo)?;
     context.encrypt_io(read, path, write)?;
     Ok(())
 }
@@ -695,8 +719,14 @@ impl Context {
     }
 }
 
-fn smudge<R: Read, W: Write>(read: &mut R, write: &mut W, path: &OsStr) -> Result<(), Error> {
-    let mut context = Context::new()?;
+fn smudge<R: Read, W: Write, P: AsRef<Path>>(
+    read: &mut R,
+    write: &mut W,
+    path: &OsStr,
+    repo_path: P,
+) -> Result<(), Error> {
+    let repo = GitRepository::from_path(repo_path)?;
+    let mut context = Context::with_repo(repo)?;
     context.decrypt_io(read, path.as_encoded_bytes(), write)?;
     Ok(())
 }
@@ -1066,8 +1096,13 @@ fn decrypt(context: &mut Context, data: Oid, path: &[u8]) -> Result<Oid, Error> 
     Ok(decrypt_obj_oid)
 }
 
-fn textconv<W: Write>(write: &mut W, path: &Path) -> Result<(), Error> {
-    let mut context = Context::new()?;
+fn textconv<W: Write, P: AsRef<Path>, Q: AsRef<Path>>(
+    write: &mut W,
+    path: P,
+    repo_path: Q,
+) -> Result<(), Error> {
+    let repo = GitRepository::from_path(repo_path)?;
+    let mut context = Context::with_repo(repo)?;
 
     context.decrypt_io(
         &mut fs::OpenOptions::new().read(true).open(path)?,

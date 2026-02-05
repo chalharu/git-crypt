@@ -88,7 +88,7 @@ impl TestRepositoryBuilder {
         }
 
         TestRepository {
-            _tempdir: tempdir,
+            tempdir,
             context: Context::with_repo(GitRepository { repo }).unwrap(),
         }
     }
@@ -118,7 +118,7 @@ pub fn generate_keypair() -> (Vec<u8>, Vec<u8>) {
 }
 
 pub struct TestRepository {
-    _tempdir: TempDir,
+    tempdir: TempDir,
     context: Context,
 }
 
@@ -129,5 +129,9 @@ impl TestRepository {
 
     pub fn context_mut(&mut self) -> &mut Context {
         &mut self.context
+    }
+
+    pub fn path(&self) -> &std::path::Path {
+        self.tempdir.path()
     }
 }
