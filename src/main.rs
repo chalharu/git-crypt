@@ -322,7 +322,7 @@ fn main() {
             }
         }
         Commands::Setup { args } => {
-            if let Err(e) = setup(&args) {
+            if let Err(e) = setup(&mut std::io::stderr(), &args) {
                 log::error!("Setup failed: {}", e);
                 std::process::exit(1);
             }
@@ -2334,28 +2334,31 @@ fn build_setup_plan(
     })
 }
 
-fn print_setup_plan(setup_plan: &SetupPlan) {
-    println!();
-    println!("[Git Config Changes]");
-    setup_plan.gitconfig_changes.iter().for_each(|change| {
+fn print_setup_plan<W: Write>(
+    writer: &mut W,
+    setup_plan: &SetupPlan,
+) -> Result<(), std::io::Error> {
+    writeln!(writer)?;
+    writeln!(writer, "[Git Config Changes]")?;
+    for change in setup_plan.gitconfig_changes.iter() {
         if change.old_value == change.new_value {
             if let Some(v) = change.new_value.as_ref() {
-                println!("  {} = {}", change.key, v);
+                writeln!(writer, "  {} = {}", change.key, v)?;
             }
         } else {
             if let Some(v) = change.old_value.as_ref() {
-                println!("{}", format!("- {} = {}", change.key, v).red());
+                writeln!(writer, "{}", format!("- {} = {}", change.key, v).red())?;
             }
             if let Some(v) = change.new_value.as_ref() {
-                println!("{}", format!("+ {} = {}", change.key, v).green());
+                writeln!(writer, "{}", format!("+ {} = {}", change.key, v).green())?;
             }
         }
-    });
+    }
 
-    println!();
-    println!("[.gitattributes Changes]");
+    writeln!(writer)?;
+    writeln!(writer, "[.gitattributes Changes]")?;
 
-    println!("-----");
+    writeln!(writer, "-----")?;
     for change in similar::TextDiff::from_lines(
         &String::from_utf8_lossy(&setup_plan.gitattributes_old),
         &String::from_utf8_lossy(&setup_plan.gitattributes_new),
@@ -2367,11 +2370,12 @@ fn print_setup_plan(setup_plan: &SetupPlan) {
             ChangeTag::Insert => ("+", Color::Green),
             ChangeTag::Equal => (" ", Color::White),
         };
-        let out = format!("{} {}", sign, change).color(color);
-        print!("{}", out);
+        let out = format!("{} {}", sign, change.value().trim_end()).color(color);
+        writeln!(writer, "{}", out)?;
     }
-    println!("-----");
-    println!();
+    writeln!(writer, "-----")?;
+    writeln!(writer)?;
+    Ok(())
 }
 
 fn apply_setup_plan(
@@ -2400,7 +2404,7 @@ fn apply_setup_plan(
 }
 
 /// 初期設定を行う
-fn setup(args: &SetupArguments) -> Result<(), Error> {
+fn setup<W: Write>(writer: &mut W, args: &SetupArguments) -> Result<(), Error> {
     // Gitリポジトリであることを確認
     let repo = GitRepository::new()?;
 
@@ -2435,10 +2439,10 @@ fn setup(args: &SetupArguments) -> Result<(), Error> {
     let setup_plan = build_setup_plan(&config, &git_attributes, args, &repo)?;
 
     // diff表示
-    print_setup_plan(&setup_plan);
+    print_setup_plan(writer, &setup_plan)?;
 
     if args.dry_run {
-        println!("Dry-run mode: No changes were applied.");
+        writeln!(writer, "Dry-run mode: No changes were applied.")?;
         return Ok(());
     }
 
@@ -2451,7 +2455,7 @@ fn setup(args: &SetupArguments) -> Result<(), Error> {
                 .with_default(false)
                 .prompt()?;
             if !proceed {
-                println!("Aborted by user.");
+                writeln!(writer, "Aborted by user.")?;
                 return Ok(());
             }
         }
