@@ -2359,7 +2359,8 @@ fn print_setup_plan<W: Write>(
             ChangeTag::Insert => ("+", Color::Green),
             ChangeTag::Equal => (" ", Color::White),
         };
-        let out = format!("{} {}", sign, change.value().trim_end()).color(color);
+        let out =
+            format!("{} {}", sign, change.value().trim_end_matches(['\r', '\n'])).color(color);
         writeln!(writer, "{}", out)?;
     }
     writeln!(writer, "-----")?;
