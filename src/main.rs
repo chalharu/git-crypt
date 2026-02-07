@@ -307,6 +307,7 @@ fn main() {
                 &normalize_path(remote),
                 marker_size.parse().ok(),
                 &file_path,
+                current_dir,
             ) {
                 Ok(is_automergeable) => std::process::exit(if is_automergeable { 0 } else { 1 }),
                 Err(e) => {
@@ -1271,14 +1272,16 @@ fn resolve_trivial_merge<T: Eq>(
     Ok(false)
 }
 
-fn merge(
+fn merge<P: AsRef<Path>>(
     base: &Path,
     local: &Path,
     remote: &Path,
     marker_size: Option<usize>,
     file_path: &OsStr,
+    repo_path: P,
 ) -> Result<bool, Error> {
-    let mut context = Context::new()?;
+    let repo = GitRepository::from_path(repo_path)?;
+    let mut context = Context::with_repo(repo)?;
 
     let mut base_file = fs::OpenOptions::new().read(true).open(base)?;
     let base_crypted_oid = context.repo.write_blob(&mut base_file)?;
