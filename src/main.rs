@@ -2277,10 +2277,9 @@ fn strip_filter_attributes(line_buf: &[u8], special_files: &BTreeSet<Vec<u8>>) -
     }
 }
 
-fn build_gitattributes<P: AsRef<Path>>(
-    args: &SetupArguments,
-    repo: &GitRepository,
-    additional_paths: &[P],
+fn build_gitattributes(
+    filter_name: &str,
+    special_files: &BTreeSet<Vec<u8>>,
     git_attributes: &[u8],
 ) -> Result<Vec<u8>, Error> {
     // .gitattributesの設定内容を準備
@@ -2292,24 +2291,9 @@ fn build_gitattributes<P: AsRef<Path>>(
     // - `.gitignore filter= diff= merge=`
     // - `.gitkeep filter= diff= merge=`
 
-    let filter_name = resolve_filter_name(args)?;
-
-    let mut special_files = BTreeSet::from([
-        b".gitattributes".to_vec(),
-        b".gitignore".to_vec(),
-        b".gitkeep".to_vec(),
-    ]);
-    for path in additional_paths {
-        if let Ok(relative_path) = relative_git_path(repo, path.as_ref())
-            && !repo.repo.status_should_ignore(&relative_path)?
-        {
-            special_files.insert(relative_path.as_os_str().as_encoded_bytes().to_vec());
-        }
-    }
-
     let mut new_gitattributes = git_attributes
         .split(|&b| b == b'\n')
-        .filter_map(|l| strip_filter_attributes(l, &special_files))
+        .filter_map(|l| strip_filter_attributes(l, special_files))
         .collect::<Vec<_>>();
 
     if new_gitattributes.iter().all(|line| line.is_empty()) {
@@ -2328,7 +2312,7 @@ fn build_gitattributes<P: AsRef<Path>>(
         .to_vec(),
     );
 
-    for mut special_file in special_files.into_iter() {
+    for mut special_file in special_files.iter().cloned() {
         special_file.extend_from_slice(b" filter= diff= merge=");
         new_gitattributes.push(special_file);
     }
@@ -2350,7 +2334,21 @@ fn build_setup_plan(
 
     let (gitconfig_changes, keys) = build_gitconfig_changes(args, config, render_config)?;
 
-    let new_gitattributes = build_gitattributes(args, repo, &keys, git_attributes)?;
+    let mut special_files = BTreeSet::from([
+        b".gitattributes".to_vec(),
+        b".gitignore".to_vec(),
+        b".gitkeep".to_vec(),
+    ]);
+    for path in keys.iter() {
+        if let Ok(relative_path) = relative_git_path(repo, path.as_ref())
+            && !repo.repo.status_should_ignore(&relative_path)?
+        {
+            special_files.insert(relative_path.as_os_str().as_encoded_bytes().to_vec());
+        }
+    }
+
+    let filter_name = resolve_filter_name(args)?;
+    let new_gitattributes = build_gitattributes(&filter_name, &special_files, git_attributes)?;
     Ok(SetupPlan {
         gitconfig_changes,
         gitattributes_old: git_attributes.to_vec(),
