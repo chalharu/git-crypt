@@ -11,12 +11,12 @@ git2 = { version = "0.21.0", git = "https://github.com/chalharu/git2-rs.git" }
 hex = "0.4.3"
 inquire = "0.9.2"
 log = "0.4.29"
-pgp = "0.18.0"
+pgp = "0.19.0"
 rand = "0.8.5" # pgpで使われているrandのバージョンが0.8.5のため、合わせる必要がある。
 regex = "1.12.2"
 similar = "2.7.0"
 stderrlog = "0.6.0"
-sysinfo = { version = "0.37.2", default-features = false, features = ["system", "windows"] }
+sysinfo = { version = "0.38.2", default-features = false, features = ["system", "windows"] }
 thiserror = "2.0.18"
 
 [profile.release]

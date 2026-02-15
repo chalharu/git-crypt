@@ -28,8 +28,9 @@ use pgp::{
         SignedPublicKey, SignedPublicSubKey, SignedSecretKey, TheRing,
     },
     crypto::sym::SymmetricKeyAlgorithm,
-    types::{CompressionAlgorithm, KeyDetails as _, PublicKeyTrait},
+    types::{CompressionAlgorithm, EskType, KeyDetails as _, PkeskBytes},
 };
+use rand::{CryptoRng, Rng};
 use regex::bytes::Regex;
 use similar::ChangeTag;
 
@@ -434,12 +435,12 @@ impl TryFrom<&GitConfig> for KeyPair {
         let public_key = read_public_key(&fs::read(&config.public_key)?)?;
         log::debug!("Loaded public key: {}", public_key.fingerprint());
         for subkey in public_key.public_subkeys.iter() {
-            log::debug!("  Subkey: {}", subkey.key_id(),);
+            log::debug!("  Subkey: {}", subkey.legacy_key_id(),);
         }
         let private_key = read_secret_key(&fs::read(&config.private_key)?)?;
         log::debug!("Loaded private key: {}", private_key.fingerprint());
         for subkey in private_key.secret_subkeys.iter() {
-            log::debug!("  Subkey: {}", subkey.key_id(),);
+            log::debug!("  Subkey: {}", subkey.legacy_key_id(),);
         }
         Ok(KeyPair {
             public_key,
@@ -453,7 +454,7 @@ fn read_secret_key(input: &[u8]) -> Result<SignedSecretKey, Error> {
     let (key, _headers) = SignedSecretKey::from_reader_single(input)?;
 
     // Check that the binding self-signatures for each component are valid
-    key.verify()?;
+    key.verify_bindings()?;
 
     Ok(key)
 }
@@ -463,7 +464,7 @@ fn read_public_key(input: &[u8]) -> Result<SignedPublicKey, Error> {
     let (cert, _headers) = SignedPublicKey::from_reader_single(input)?;
 
     // Check that the binding self-signatures for each component are valid
-    cert.verify()?;
+    cert.verify_bindings()?;
 
     Ok(cert)
 }
@@ -685,8 +686,8 @@ impl Context {
     fn find_public_key_by_id(&self, key_id: Option<&[u8]>) -> Option<PublicKey> {
         if let Some(key_id) = key_id {
             // 指定されたキーIDに一致するサブキーを探す
-            if self.keypair.public_key.key_id().as_ref() == key_id
-                && self.keypair.public_key.is_encryption_key()
+            if self.keypair.public_key.legacy_key_id().as_ref() == key_id
+                && self.keypair.public_key.algorithm().can_encrypt()
             {
                 // 主キーが一致する場合
                 return Some(PublicKey::SignedPublicKey(self.keypair.public_key.clone()));
@@ -696,17 +697,12 @@ impl Context {
                 .public_subkeys
                 .iter()
                 .find(|subkey| {
-                    subkey.is_encryption_key()
-                        && subkey
-                            .as_unsigned()
-                            .key_id()
-                            .as_ref()
-                            .iter()
-                            .eq(key_id.iter())
+                    subkey.algorithm().can_encrypt()
+                        && subkey.legacy_key_id().as_ref().iter().eq(key_id.iter())
                 })
                 .map(|k| PublicKey::SignedPublicSubKey(k.clone()))
         } else {
-            if self.keypair.public_key.is_encryption_key() {
+            if self.keypair.public_key.algorithm().can_encrypt() {
                 // 主キーが暗号化キーの場合
                 return Some(PublicKey::SignedPublicKey(self.keypair.public_key.clone()));
             }
@@ -714,7 +710,7 @@ impl Context {
                 .public_key
                 .public_subkeys
                 .iter()
-                .find(|subkey| subkey.is_encryption_key())
+                .find(|subkey| subkey.algorithm().can_encrypt())
                 .map(|k| PublicKey::SignedPublicSubKey(k.clone()))
         }
     }
@@ -869,10 +865,10 @@ impl pgp::types::KeyDetails for PublicKey {
         }
     }
 
-    fn key_id(&self) -> pgp::types::KeyId {
+    fn legacy_key_id(&self) -> pgp::types::KeyId {
         match self {
-            PublicKey::SignedPublicKey(i) => i.key_id(),
-            PublicKey::SignedPublicSubKey(i) => i.key_id(),
+            PublicKey::SignedPublicKey(i) => i.legacy_key_id(),
+            PublicKey::SignedPublicSubKey(i) => i.legacy_key_id(),
         }
     }
 
@@ -882,32 +878,18 @@ impl pgp::types::KeyDetails for PublicKey {
             PublicKey::SignedPublicSubKey(i) => i.algorithm(),
         }
     }
-}
 
-impl PublicKeyTrait for PublicKey {
-    fn created_at(&self) -> &chrono::DateTime<chrono::Utc> {
+    fn created_at(&self) -> pgp::types::Timestamp {
         match self {
             PublicKey::SignedPublicKey(i) => i.created_at(),
             PublicKey::SignedPublicSubKey(i) => i.created_at(),
         }
     }
 
-    fn expiration(&self) -> Option<u16> {
+    fn legacy_v3_expiration_days(&self) -> Option<u16> {
         match self {
-            PublicKey::SignedPublicKey(i) => i.expiration(),
-            PublicKey::SignedPublicSubKey(i) => i.expiration(),
-        }
-    }
-
-    fn verify_signature(
-        &self,
-        hash: pgp::crypto::hash::HashAlgorithm,
-        data: &[u8],
-        sig: &pgp::types::SignatureBytes,
-    ) -> pgp::errors::Result<()> {
-        match self {
-            PublicKey::SignedPublicKey(i) => i.verify_signature(hash, data, sig),
-            PublicKey::SignedPublicSubKey(i) => i.verify_signature(hash, data, sig),
+            PublicKey::SignedPublicKey(i) => i.legacy_v3_expiration_days(),
+            PublicKey::SignedPublicSubKey(i) => i.legacy_v3_expiration_days(),
         }
     }
 
@@ -915,6 +897,20 @@ impl PublicKeyTrait for PublicKey {
         match self {
             PublicKey::SignedPublicKey(i) => i.public_params(),
             PublicKey::SignedPublicSubKey(i) => i.public_params(),
+        }
+    }
+}
+
+impl pgp::types::EncryptionKey for PublicKey {
+    fn encrypt<R: CryptoRng + Rng>(
+        &self,
+        rng: R,
+        plain: &[u8],
+        typ: EskType,
+    ) -> pgp::errors::Result<PkeskBytes> {
+        match self {
+            PublicKey::SignedPublicKey(i) => i.encrypt(rng, plain, typ),
+            PublicKey::SignedPublicSubKey(i) => i.encrypt(rng, plain, typ),
         }
     }
 }
@@ -2073,20 +2069,20 @@ fn collect_encryption_ids(
     private_key: &SignedSecretKey,
 ) -> HashSet<String> {
     let mut public_key_id_list = HashSet::new();
-    if public_key.is_encryption_key() {
-        public_key_id_list.insert(public_key.key_id());
+    if public_key.algorithm().can_encrypt() {
+        public_key_id_list.insert(public_key.legacy_key_id());
     }
     public_key_id_list.extend(
         public_key
             .public_subkeys
             .iter()
-            .filter(|subkey| subkey.is_encryption_key())
-            .map(|s| s.key_id()),
+            .filter(|subkey| subkey.algorithm().can_encrypt())
+            .map(|s| s.legacy_key_id()),
     );
 
     let mut private_key_id_list = HashSet::new();
-    private_key_id_list.insert(private_key.key_id());
-    private_key_id_list.extend(private_key.secret_subkeys.iter().map(|s| s.key_id()));
+    private_key_id_list.insert(private_key.legacy_key_id());
+    private_key_id_list.extend(private_key.secret_subkeys.iter().map(|s| s.legacy_key_id()));
     public_key_id_list
         .intersection(&private_key_id_list)
         .map(|s| s.to_string())

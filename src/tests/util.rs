@@ -1,6 +1,8 @@
 use git2::Repository;
-use pgp::{composed::SecretKeyParamsBuilder, ser::Serialize};
-use rand::thread_rng;
+use pgp::{
+    composed::{EncryptionCaps, SecretKeyParamsBuilder},
+    ser::Serialize,
+};
 use tempfile::TempDir;
 
 use crate::{Context, GitConfig, GitRepository};
@@ -99,20 +101,17 @@ pub fn generate_keypair() -> (Vec<u8>, Vec<u8>) {
     let private_key = SecretKeyParamsBuilder::default()
         .key_type(pgp::composed::KeyType::Rsa(2048))
         .can_certify(true)
-        .can_encrypt(true)
+        .can_encrypt(EncryptionCaps::All)
+        .can_sign(true)
         .primary_user_id("John Doe <jdoe@example.com>".to_string())
         .build()
         .expect("Failed to generate private key parameters")
         .generate(rand::thread_rng())
         .expect("Failed to generate private key");
 
-    let signed_private_key = private_key
-        .sign(thread_rng(), &"".into())
-        .expect("Failed to sign private key");
-
-    let signed_public_key = signed_private_key.signed_public_key();
+    let signed_public_key = private_key.to_public_key();
     (
-        signed_private_key.to_bytes().unwrap(),
+        private_key.to_bytes().unwrap(),
         signed_public_key.to_bytes().unwrap(),
     )
 }

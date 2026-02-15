@@ -102,7 +102,7 @@ fn encryption_policy_key_id未設定() {
 fn encryption_policy_key_id一致不一致() {
     let keypair = generate_keypair();
     let key = SignedSecretKey::from_bytes(keypair.0.as_slice()).unwrap();
-    let key_id = key.key_id().to_string();
+    let key_id = key.legacy_key_id().to_string();
 
     // 暗号化済みメッセージを生成
 
