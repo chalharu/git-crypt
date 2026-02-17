@@ -4,7 +4,7 @@ use std::{
     env::current_dir,
     ffi::{OsStr, OsString},
     fs::{self, File},
-    io::{self, BufRead, BufReader, BufWriter, ErrorKind, Read, Seek, Write},
+    io::{self, BufRead, BufReader, BufWriter, Cursor, ErrorKind, Read, Seek, Write},
     path::{self, Path, PathBuf},
     rc::Rc,
     str::FromStr,
@@ -14,7 +14,7 @@ use std::{
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use colored::{Color, Colorize};
 use git2::{
-    Config, Delta, DiffOptions, MergeFileInput, MergeFileOptions, ObjectType, Odb, Oid,
+    Config, Delta, DiffOptions, MergeFileInput, MergeFileOptions, ObjectType, Odb, OdbReader, Oid,
     TreeWalkMode, TreeWalkResult,
 };
 use inquire::{
@@ -728,8 +728,24 @@ fn smudge<R: Read, W: Write, P: AsRef<Path>>(
     Ok(())
 }
 
+enum OidReader<'a> {
+    Reader(OdbReader<'a>),
+    Vec(Cursor<Vec<u8>>),
+}
+
+impl<'a> Read for OidReader<'a> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        match self {
+            OidReader::Reader(r) => r.read(buf),
+            OidReader::Vec(v) => v.read(buf),
+        }
+    }
+}
+
 fn oid_reader<'a>(odb: &'a Odb<'a>, oid: Oid) -> Result<impl Read + 'a, git2::Error> {
-    odb.reader(oid).map(|(r, _, _)| r)
+    odb.reader(oid)
+        .map(|(r, _, _)| OidReader::Reader(r))
+        .or_else(|_| Ok(OidReader::Vec(Cursor::new(odb.read(oid)?.data().to_vec()))))
 }
 
 struct DebugReader<R: Read>(R);
@@ -805,7 +821,12 @@ fn cache_oid_lookup(
         }
         Err(e) => return Err(e.into()),
     };
-    log::debug!("Cache hit for {}: {} -> {}", cache_type.as_str(), cache_ref, ref_target);
+    log::debug!(
+        "Cache hit for {}: {} -> {}",
+        cache_type.as_str(),
+        cache_ref,
+        ref_target
+    );
     Ok(Some(ref_target))
 }
 
