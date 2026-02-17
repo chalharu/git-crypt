@@ -805,7 +805,7 @@ fn cache_oid_lookup(
         }
         Err(e) => return Err(e.into()),
     };
-    log::debug!("Cache hit for {}: {}", cache_type.as_str(), cache_ref);
+    log::debug!("Cache hit for {}: {} -> {}", cache_type.as_str(), cache_ref, ref_target);
     Ok(Some(ref_target))
 }
 
