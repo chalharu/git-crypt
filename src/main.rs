@@ -385,8 +385,8 @@ pub struct SetupArguments {
 
 #[derive(Debug, thiserror::Error)]
 enum Error {
-    #[error("Failed to load git configuration")]
-    GitConfig(#[from] git2::Error),
+    #[error("Git error occurred: {0}")]
+    Git(#[from] git2::Error),
     #[error("IO error occurred")]
     Io(#[from] std::io::Error),
     #[error("PGP error occurred")]
@@ -1709,6 +1709,7 @@ impl<R: Read, W: Write> PktLineProcess<R, W> {
     }
 
     fn output_content_with_oid(&mut self, oid: Oid) -> Result<(), Error> {
+        log::debug!("Outputting content with OID: {}", oid);
         let odb = self.context.repo.repo.odb()?;
         let mut reader = oid_reader(&odb, oid)?;
 
