@@ -1,0 +1,95 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+  pull-requests: read
+
+concurrency:
+  group: release-main
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: ${{ !contains(github.event.head_commit.message, '[skip ci]') }}
+    runs-on: ubuntu-latest
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GITHUB_REPOSITORY: ${{ github.repository }}
+
+    steps:
+      - name: Check out latest main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Fetch latest refs
+        run: git fetch --prune --tags origin main
+
+      - name: Compute release plan
+        id: plan
+        run: |
+          node .github/scripts/release-plan.mjs > release-plan.json
+          cat release-plan.json
+          echo "release_needed=$(jq -r '.releaseNeeded' release-plan.json)" >> "$GITHUB_OUTPUT"
+          echo "commit_required=$(jq -r '.commitRequired' release-plan.json)" >> "$GITHUB_OUTPUT"
+          echo "mode=$(jq -r '.mode' release-plan.json)" >> "$GITHUB_OUTPUT"
+          echo "tag=$(jq -r '.tag // empty' release-plan.json)" >> "$GITHUB_OUTPUT"
+          echo "version=$(jq -r '.version // empty' release-plan.json)" >> "$GITHUB_OUTPUT"
+
+      - name: Ensure main has not advanced during planning
+        id: stability
+        if: steps.plan.outputs.release_needed == 'true'
+        run: |
+          git fetch origin main
+          if [ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ]; then
+            echo "stable=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "stable=false" >> "$GITHUB_OUTPUT"
+            echo "main advanced during release planning; a later push will handle the release"
+          fi
+
+      - name: Configure release git identity
+        if: steps.plan.outputs.release_needed == 'true' && steps.stability.outputs.stable == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Bump Cargo package version
+        if: steps.plan.outputs.commit_required == 'true' && steps.stability.outputs.stable == 'true'
+        run: |
+          node .github/scripts/bump-cargo-version.mjs "${{ steps.plan.outputs.version }}"
+          git add Cargo.toml Cargo.lock
+          git commit -m "chore(release): cut ${{ steps.plan.outputs.tag }} [skip ci]"
+          git tag "${{ steps.plan.outputs.tag }}"
+          git push origin HEAD:main "refs/tags/${{ steps.plan.outputs.tag }}"
+
+      - name: Push release tag without manifest changes
+        if: steps.plan.outputs.release_needed == 'true' && steps.plan.outputs.commit_required != 'true' && steps.plan.outputs.mode != 'existing-head-tag' && steps.stability.outputs.stable == 'true'
+        run: |
+          git tag "${{ steps.plan.outputs.tag }}"
+          git push origin "refs/tags/${{ steps.plan.outputs.tag }}"
+
+      - name: Create GitHub release
+        if: steps.plan.outputs.release_needed == 'true' && steps.stability.outputs.stable == 'true'
+        run: |
+          if gh release view "${{ steps.plan.outputs.tag }}" >/dev/null 2>&1; then
+            echo "Release ${{ steps.plan.outputs.tag }} already exists"
+            exit 0
+          fi
+
+          if [ "${{ steps.plan.outputs.mode }}" = "bootstrap" ]; then
+            gh release create "${{ steps.plan.outputs.tag }}" \
+              --title "${{ steps.plan.outputs.tag }}" \
+              --notes "Bootstrap release for the current Cargo package version."
+            exit 0
+          fi
+
+          gh release create "${{ steps.plan.outputs.tag }}" \
+            --title "${{ steps.plan.outputs.tag }}" \
+            --generate-notes
