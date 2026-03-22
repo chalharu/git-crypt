@@ -122,6 +122,10 @@ pub struct TestRepository {
 }
 
 impl TestRepository {
+    pub fn into_parts(self) -> (Context, TempDir) {
+        (self.context, self.tempdir)
+    }
+
     pub fn context(&self) -> &Context {
         &self.context
     }

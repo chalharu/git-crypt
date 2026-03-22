@@ -1629,6 +1629,11 @@ impl<R: Read, W: Write> PktLineProcess<R, W> {
         Self::with_pkt_io(PktLineIO::with_rw(reader, writer))
     }
 
+    #[cfg(test)]
+    fn with_context_and_pkt_io(context: Context, pkt_io: PktLineIO<R, W>) -> Self {
+        PktLineProcess { context, pkt_io }
+    }
+
     fn with_pkt_io(pkt_io: PktLineIO<R, W>) -> Result<Self, Error> {
         Ok(PktLineProcess {
             pkt_io,
