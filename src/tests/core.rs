@@ -1,9 +1,18 @@
-use std::{path::PathBuf, str::FromStr};
+use std::{
+    path::PathBuf,
+    str::FromStr,
+    sync::{Mutex, OnceLock},
+};
 
 use crate::{
-    decrypt, encrypt,
+    decrypt, decryption_key_password, encrypt,
     tests::util::{TestRepositoryBuilder, generate_keypair},
 };
+
+fn passphrase_env_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
 
 // 平文→暗号化→復号で一致
 // Given: 平文 b"hello\n", 対象パス src/a.txt
@@ -184,4 +193,30 @@ fn decrypt_キー不一致の復号は素通し() {
     )
     .unwrap();
     assert_eq!(encrypted_oid, output_oid);
+}
+
+#[test]
+fn decrypt_環境変数パスフレーズを取得する() {
+    let _guard = passphrase_env_lock().lock().unwrap();
+    let previous = std::env::var_os("GIT_CRYPT_PASSPHRASE");
+
+    // Rust 2024 では環境変数の更新が unsafe なので、このテストではロックで直列化する。
+    unsafe {
+        std::env::remove_var("GIT_CRYPT_PASSPHRASE");
+    }
+    assert_eq!(decryption_key_password(), "");
+
+    unsafe {
+        std::env::set_var("GIT_CRYPT_PASSPHRASE", "secret");
+    }
+    assert_eq!(decryption_key_password(), "secret");
+
+    match previous {
+        Some(value) => unsafe {
+            std::env::set_var("GIT_CRYPT_PASSPHRASE", value);
+        },
+        None => unsafe {
+            std::env::remove_var("GIT_CRYPT_PASSPHRASE");
+        },
+    }
 }

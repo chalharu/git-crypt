@@ -210,6 +210,13 @@ fn normalize_path<P: AsRef<Path>>(path: P) -> PathBuf {
     path
 }
 
+fn parse_merge_marker_size(marker_size: &str) -> Result<u16, Error> {
+    let marker_size = marker_size
+        .parse::<u32>()
+        .map_err(|_| Error::InvalidMarkerSize(marker_size.to_owned()))?;
+    u16::try_from(marker_size).map_err(|_| Error::InvalidMarkerSize(marker_size.to_string()))
+}
+
 fn main() {
     let cli = Cli::parse();
 
@@ -302,11 +309,18 @@ fn main() {
             marker_size,
             file_path,
         } => {
+            let marker_size = match parse_merge_marker_size(&marker_size) {
+                Ok(marker_size) => marker_size,
+                Err(e) => {
+                    log::error!("Error during merge: {}", e);
+                    std::process::exit(2);
+                }
+            };
             match merge(
                 &normalize_path(base),
                 &normalize_path(local),
                 &normalize_path(remote),
-                marker_size.parse().ok(),
+                Some(marker_size),
                 &file_path,
                 current_dir,
             ) {
@@ -407,6 +421,8 @@ enum Error {
     InvalidVersion,
     #[error("Pathname is missing in the command")]
     PathnameIsMissing,
+    #[error("Invalid merge marker size: {0}")]
+    InvalidMarkerSize(String),
     #[error("Invalid packet length")]
     InvalidPacketLength,
     #[error("Invalid packet UTF-8: {0}")]
@@ -1028,10 +1044,16 @@ fn encrypt<'a, T: 'a + ToPath<'a>>(context: &mut Context, oid: Oid, path: T) -> 
     Ok(encrypt_obj_oid)
 }
 
+fn decryption_key_password() -> String {
+    std::env::var_os("GIT_CRYPT_PASSPHRASE")
+        .map(|password| password.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
 fn decrypt_message(message: Message, key_pair: &KeyPair) -> Result<impl Read, Error> {
     // 復号化処理
     let decrypt_options = DecryptionOptions::new().enable_gnupg_aead().enable_legacy();
-    let password = "".into();
+    let password: pgp::types::Password = decryption_key_password().into();
     let ring = TheRing {
         secret_keys: vec![&key_pair.private_key],
         key_passwords: vec![&password],
@@ -1236,7 +1258,7 @@ fn pre_auto_gc() -> Result<(), Error> {
     // 残ったcrypt-cache参照を削除
     for (_, ref_name) in crypt_cache_paths {
         if let Ok(mut reference) = repo.repo.find_reference(&ref_name) {
-            log::error!("Deleting unused reference: {}", ref_name);
+            log::info!("Deleting unused reference: {}", ref_name);
             // エラーが発生しても無視
             let _ = reference.delete();
         }
@@ -1293,7 +1315,7 @@ fn merge<P: AsRef<Path>>(
     base: &Path,
     local: &Path,
     remote: &Path,
-    marker_size: Option<usize>,
+    marker_size: Option<u16>,
     file_path: &OsStr,
     repo_path: P,
 ) -> Result<bool, Error> {
@@ -1365,7 +1387,7 @@ fn merge<P: AsRef<Path>>(
     // ここで3-wayマージを実行する
     let mut file_opts = MergeFileOptions::new();
     if let Some(marker_size) = marker_size {
-        file_opts.marker_size(marker_size as u16);
+        file_opts.marker_size(marker_size);
     }
 
     let result = git2::merge_file(&base_obj, &local_obj, &remote_obj, Some(&mut file_opts))?;
@@ -2132,14 +2154,17 @@ fn resolve_encryption_key_id(
 
     log::debug!("Available Encryption ID list: {:?}", encryption_id_list);
 
-    let encryption_key_id = args.encryption_key_id.clone().or_else(|| {
+    let configured_encryption_key_id = args.encryption_key_id.clone().or_else(|| {
         config
             .get_string(&GitConfig::combine_section_key(
                 GitConfig::ENCRYPTION_KEY_ID,
             ))
             .ok()
     });
-    let encryption_key_id = encryption_key_id.filter(|s| encryption_id_list.contains(s));
+    let encryption_key_id = configured_encryption_key_id
+        .as_ref()
+        .filter(|s| encryption_id_list.contains(*s))
+        .cloned();
 
     let encryption_key_id = {
         if !args.yes {
@@ -2155,6 +2180,13 @@ fn resolve_encryption_key_id(
                 .filter(|v| !v.is_empty())
         } else {
             // 非対話モード
+            if configured_encryption_key_id.is_some() && encryption_key_id.is_none() {
+                log::error!(
+                    "Invalid encryption key ID: {:?}",
+                    configured_encryption_key_id.as_deref()
+                );
+                return Err(Error::Setup);
+            }
             encryption_key_id
         }
     };
@@ -2166,17 +2198,17 @@ fn resolve_encryption_path_regex(
     config: &Config,
     render_config: RenderConfig,
 ) -> Result<Option<String>, Error> {
-    let encryption_path_regex = args
-        .encryption_path_regex
-        .clone()
-        .or_else(|| {
-            config
-                .get_string(&GitConfig::combine_section_key(
-                    GitConfig::ENCRYPTION_PATH_REGEX,
-                ))
-                .ok()
-        })
-        .filter(|p| validate_encryption_path_regex(p).is_ok_and(|v| v == Validation::Valid));
+    let configured_encryption_path_regex = args.encryption_path_regex.clone().or_else(|| {
+        config
+            .get_string(&GitConfig::combine_section_key(
+                GitConfig::ENCRYPTION_PATH_REGEX,
+            ))
+            .ok()
+    });
+    let encryption_path_regex = configured_encryption_path_regex
+        .as_ref()
+        .filter(|p| validate_encryption_path_regex(p).is_ok_and(|v| v == Validation::Valid))
+        .cloned();
 
     let encryption_path_regex = {
         if !args.yes {
@@ -2198,6 +2230,13 @@ fn resolve_encryption_path_regex(
             .filter(|v| !v.is_empty())
         } else {
             // 非対話モード
+            if configured_encryption_path_regex.is_some() && encryption_path_regex.is_none() {
+                log::error!(
+                    "Invalid encryption path regex: {:?}",
+                    configured_encryption_path_regex.as_deref()
+                );
+                return Err(Error::Setup);
+            }
             encryption_path_regex
         }
     };
@@ -2208,6 +2247,7 @@ fn build_gitconfig_changes(
     args: &SetupArguments,
     config: &Config,
     render_config: RenderConfig,
+    filter_name: &str,
 ) -> Result<(ConfigChanges, Vec<PathBuf>), Error> {
     let mut gitconfig_changes = ConfigChanges::new();
 
@@ -2242,6 +2282,39 @@ fn build_gitconfig_changes(
         });
     }
 
+    for (key, new_value) in [
+        (
+            format!("filter.{filter_name}.clean"),
+            Some("git-crypt clean %f".to_string()),
+        ),
+        (
+            format!("filter.{filter_name}.smudge"),
+            Some("git-crypt smudge %f".to_string()),
+        ),
+        (
+            format!("filter.{filter_name}.process"),
+            Some("git-crypt process".to_string()),
+        ),
+        (
+            format!("filter.{filter_name}.required"),
+            Some("true".to_string()),
+        ),
+        (
+            format!("diff.{filter_name}.textconv"),
+            Some("git-crypt textconv".to_string()),
+        ),
+        (
+            format!("merge.{filter_name}.driver"),
+            Some("git-crypt merge %O %A %B %L %P".to_string()),
+        ),
+    ] {
+        gitconfig_changes.push(ConfigChange {
+            old_value: config.get_string(&key).ok(),
+            key,
+            new_value,
+        });
+    }
+
     Ok((gitconfig_changes, vec![public_key, private_key]))
 }
 
@@ -2258,7 +2331,12 @@ fn resolve_filter_name(args: &SetupArguments) -> Result<String, Error> {
             args.filter_name.clone().unwrap_or("crypt".into())
         }
     };
-    Ok(filter_name)
+    if validate_filter_name(&filter_name).is_ok_and(|v| v == Validation::Valid) {
+        Ok(filter_name)
+    } else {
+        log::error!("Invalid filter name: {}", filter_name);
+        Err(Error::Setup)
+    }
 }
 
 fn strip_filter_attributes(line_buf: &[u8], special_files: &BTreeSet<Vec<u8>>) -> Option<Vec<u8>> {
@@ -2358,7 +2436,9 @@ fn build_setup_plan(
     let render_config = RenderConfig::default();
     set_global_render_config(render_config);
 
-    let (gitconfig_changes, keys) = build_gitconfig_changes(args, config, render_config)?;
+    let filter_name = resolve_filter_name(args)?;
+    let (gitconfig_changes, keys) =
+        build_gitconfig_changes(args, config, render_config, &filter_name)?;
 
     let mut special_files = BTreeSet::from([
         b".gitattributes".to_vec(),
@@ -2373,7 +2453,6 @@ fn build_setup_plan(
         }
     }
 
-    let filter_name = resolve_filter_name(args)?;
     let new_gitattributes = build_gitattributes(&filter_name, &special_files, git_attributes)?;
     Ok(SetupPlan {
         gitconfig_changes,

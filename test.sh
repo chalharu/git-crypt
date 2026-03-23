@@ -1,4 +1,6 @@
-#!/bin/sh
+#!/usr/bin/env bash
+
+set -euo pipefail
 
 # テストヘルパー関数
 
@@ -7,9 +9,9 @@ get_head() {
     return 0
   fi
   if [ -z "${2-}" ] || [ "${2-}" = "-" ]; then
-    dd bs="$1" count=1 iflag=fullblock 2>/dev/null
+    head -c "$1"
   else
-    dd bs="$1" count=1 if="$2" iflag=fullblock 2>/dev/null
+    head -c "$1" "$2"
   fi
 }
 
@@ -33,7 +35,6 @@ get_filesize() {
     return 1
 }
 
-set -u
 LC_ALL=C
 
 # cargoとjqの存在確認
@@ -120,7 +121,7 @@ if ! printf '%s' "$PLAINTEXT" | "$GIT_CRYPT" clean "$TEST_NONSECRET_PATH" >"$TMP
 fi
 
 if ! (printf '%s' "$PLAINTEXT" | diff -u "$TMPDIR/non-encrypted" - > /dev/null); then
-  echo "FAIL: clean output matches plaintext" >&2
+  echo "FAIL: clean output does not match plaintext" >&2
   exit 1
 fi
 
@@ -255,8 +256,11 @@ cat "$TMPDIR/base.txt" | "$GIT_CRYPT" clean "$TEST_PATH" > "$TMPDIR/base.enc"
 cat "$TMPDIR/local.txt" | "$GIT_CRYPT" clean "$TEST_PATH" > "$TMPDIR/local.enc"
 cat "$TMPDIR/remote.txt" | "$GIT_CRYPT" clean "$TEST_PATH" > "$TMPDIR/remote.enc"
 
-"$GIT_CRYPT" merge "$TMPDIR/base.enc" "$TMPDIR/local.enc" "$TMPDIR/remote.enc" 3 "$TEST_PATH"
-RET=$?
+if "$GIT_CRYPT" merge "$TMPDIR/base.enc" "$TMPDIR/local.enc" "$TMPDIR/remote.enc" 3 "$TEST_PATH"; then
+  RET=0
+else
+  RET=$?
+fi
 echo "Exit code: $RET (should be >0 for conflict)"
 if [ $RET -eq 0 ]; then
   echo "FAIL: merge returned zero for conflict case" >&2
@@ -335,12 +339,10 @@ PROCESS_OUTPUT="$TMPDIR/process_output"
     PAYLOAD_LEN=$((${#PLAINTEXT} + 4))
     printf '%04x%s' "$PAYLOAD_LEN" "$PLAINTEXT"
     printf "0000"
-} | "$GIT_CRYPT" --debug process > "$PROCESS_OUTPUT"
-
-if [ $? -ne 0 ]; then
+} | "$GIT_CRYPT" --debug process > "$PROCESS_OUTPUT" || {
     echo "FAIL: process command returned non-zero" >&2
     exit 1
-fi
+}
 
 if ! grep -E '\-----BEGIN PGP MESSAGE-----' "$PROCESS_OUTPUT" > /dev/null; then
   echo "FAIL: process command (clean) output is not a PGP message" >&2
@@ -413,12 +415,10 @@ PROCESS_OUTPUT="$TMPDIR/process_output_smudge"
     printf '%04x' "$PAYLOAD_LEN"
     cat "$TMPDIR/encrypted"
     printf "0000"
-} | "$GIT_CRYPT" process > "$PROCESS_OUTPUT"
-
-if [ $? -ne 0 ]; then
+} | "$GIT_CRYPT" process > "$PROCESS_OUTPUT" || {
     echo "FAIL: process command (smudge) returned non-zero" >&2
     exit 1
-fi
+}
 
 # 受信データを分解
 HEADER="0016git-filter-server\n000eversion=2\n00000016capability=smudge\n00000013status=success\n"
