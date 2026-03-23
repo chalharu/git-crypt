@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
@@ -14,6 +15,15 @@ import {
 	isReleaseRelevantFile,
 	parseManifest,
 } from "./release-utils.mjs";
+
+const releaseWorkflowText = readFileSync(
+	new URL("../workflows/release.yml", import.meta.url),
+	"utf8",
+);
+const releaseAssetsWorkflowText = readFileSync(
+	new URL("../workflows/release-assets.yml", import.meta.url),
+	"utf8",
+);
 
 test("parseManifest reads the package name and version", () => {
 	const manifest = parseManifest(
@@ -188,4 +198,21 @@ test("individual Cargo update helpers reject missing package metadata", () => {
 		),
 		/version = "0\.2\.4"/u,
 	);
+});
+
+test("release workflow delegates asset publishing to the reusable release-assets workflow", () => {
+	assert.match(
+		releaseWorkflowText,
+		/release_assets:[\s\S]*uses:\s+\.\/\.github\/workflows\/release-assets\.yml/u,
+	);
+	assert.match(
+		releaseWorkflowText,
+		/with:[\s\S]*tag:\s+\$\{\{\s*needs\.release\.outputs\.tag\s*\}\}/u,
+	);
+});
+
+test("release-assets workflow is reusable or manually dispatched instead of listening for published releases", () => {
+	assert.match(releaseAssetsWorkflowText, /workflow_call:[\s\S]*tag:/u);
+	assert.match(releaseAssetsWorkflowText, /workflow_dispatch:[\s\S]*tag:/u);
+	assert.doesNotMatch(releaseAssetsWorkflowText, /\n\s*release:\n/u);
 });

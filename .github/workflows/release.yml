@@ -17,6 +17,10 @@ jobs:
   release:
     if: ${{ !contains(github.event.head_commit.message, '[skip ci]') }}
     runs-on: ubuntu-latest
+    outputs:
+      release_needed: ${{ steps.plan.outputs.release_needed }}
+      stable: ${{ steps.release_state.outputs.stable }}
+      tag: ${{ steps.plan.outputs.tag }}
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       GITHUB_REPOSITORY: ${{ github.repository }}
@@ -53,6 +57,15 @@ jobs:
             echo "stable=false" >> "$GITHUB_OUTPUT"
             echo "main advanced during release planning; a later push will handle the release"
           fi
+
+      - name: Record release stability
+        id: release_state
+        run: |
+          stable="${{ steps.stability.outputs.stable }}"
+          if [ -z "$stable" ]; then
+            stable="false"
+          fi
+          echo "stable=$stable" >> "$GITHUB_OUTPUT"
 
       - name: Configure release git identity
         if: steps.plan.outputs.release_needed == 'true' && steps.stability.outputs.stable == 'true'
@@ -93,3 +106,14 @@ jobs:
           gh release create "${{ steps.plan.outputs.tag }}" \
             --title "${{ steps.plan.outputs.tag }}" \
             --generate-notes
+
+  release_assets:
+    name: Release Assets
+    needs: release
+    if: needs.release.outputs.release_needed == 'true' && needs.release.outputs.stable == 'true'
+    permissions:
+      contents: write
+    uses: ./.github/workflows/release-assets.yml
+    secrets: inherit
+    with:
+      tag: ${{ needs.release.outputs.tag }}
