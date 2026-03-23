@@ -1,4 +1,18 @@
-use crate::{PktLineIO, PktLineProcess};
+use tempfile::TempDir;
+
+use crate::{tests::util::TestRepositoryBuilder, PktLineIO, PktLineProcess};
+
+fn process_with_test_context<'a>(
+    reader: &'a [u8],
+    writer: &'a mut Vec<u8>,
+) -> (PktLineProcess<&'a [u8], &'a mut Vec<u8>>, TempDir) {
+    let test_repo = TestRepositoryBuilder::new().build();
+    let (context, tempdir) = test_repo.into_parts();
+    (
+        PktLineProcess::with_context_and_pkt_io(context, PktLineIO::with_rw(reader, writer)),
+        tempdir,
+    )
+}
 
 // 正常ハンドシェイク
 // Given: git-filter-client + version=2
@@ -8,7 +22,7 @@ use crate::{PktLineIO, PktLineProcess};
 fn git_filter_process_正常ハンドシェイク() {
     let reader = b"0016git-filter-client\n000eversion=2\n0000".as_slice();
     let mut writer = Vec::new();
-    let mut process = PktLineProcess::with_pkt_io(PktLineIO::with_rw(reader, &mut writer)).unwrap();
+    let (mut process, _tempdir) = process_with_test_context(reader, &mut writer);
     assert!(matches!(
         process.process(),
         Err(crate::Error::UnexpectedEof)
@@ -26,7 +40,7 @@ fn git_filter_process_正常ハンドシェイク() {
 fn git_filter_process_異常ハンドシェイク_ヘッダ不正() {
     let reader = b"0013invalid-header\n000eversion=2\n0000".as_slice();
     let mut writer = Vec::new();
-    let mut process = PktLineProcess::with_pkt_io(PktLineIO::with_rw(reader, &mut writer)).unwrap();
+    let (mut process, _tempdir) = process_with_test_context(reader, &mut writer);
     let result = process.process();
     assert!(matches!(
         result,
@@ -42,7 +56,7 @@ fn git_filter_process_異常ハンドシェイク_ヘッダ不正() {
 fn git_filter_process_異常ハンドシェイク_version不正() {
     let reader = b"0016git-filter-client\n000eversion=1\n0000".as_slice();
     let mut writer = Vec::new();
-    let mut process = PktLineProcess::with_pkt_io(PktLineIO::with_rw(reader, &mut writer)).unwrap();
+    let (mut process, _tempdir) = process_with_test_context(reader, &mut writer);
     let result = process.process();
     assert!(matches!(result, Err(crate::Error::InvalidVersion)));
 }
@@ -56,7 +70,7 @@ fn git_filter_process_unknown_command() {
     // capabilityは何も指定しない
     let reader = b"0016git-filter-client\n000eversion=2\n00000015capability=clean\n00000018command=unknown-cmd\n0000".as_slice();
     let mut writer = Vec::new();
-    let mut process = PktLineProcess::with_pkt_io(PktLineIO::with_rw(reader, &mut writer)).unwrap();
+    let (mut process, _tempdir) = process_with_test_context(reader, &mut writer);
     process.process().unwrap();
     let expected_output = b"0016git-filter-server\n000eversion=2\n00000015capability=clean\n00000011status=error\n0000";
     drop(process);

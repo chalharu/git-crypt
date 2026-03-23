@@ -1,0 +1,77 @@
+name: Release Assets
+
+on:
+  release:
+    types:
+      - published
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-assets-${{ github.event.release.tag_name }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            asset_suffix: linux-x86_64
+          - runner: ubuntu-24.04-arm
+            asset_suffix: linux-aarch64
+
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - name: Check out release tag
+        uses: actions/checkout@v4.3.1
+        with:
+          ref: ${{ github.event.release.tag_name }}
+
+      - name: Install Rust toolchain
+        run: |
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
+          fi
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          "$HOME/.cargo/bin/rustup" toolchain install stable --profile minimal
+          "$HOME/.cargo/bin/rustup" default stable
+
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-${{ matrix.asset_suffix }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ matrix.asset_suffix }}-cargo-
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Package release assets
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+          ASSET_SUFFIX: ${{ matrix.asset_suffix }}
+        run: |
+          package_dir="git-crypt-${TAG}-${ASSET_SUFFIX}"
+          mkdir -p "$package_dir"
+          cp target/release/git-crypt "$package_dir/"
+          cp README.md LICENSE "$package_dir/"
+          tar -czf "${package_dir}.tar.gz" "$package_dir"
+          sha256sum "${package_dir}.tar.gz" > "${package_dir}.tar.gz.sha256"
+
+      - name: Upload release assets
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.release.tag_name }}
+          ASSET_SUFFIX: ${{ matrix.asset_suffix }}
+        run: |
+          package_dir="git-crypt-${TAG}-${ASSET_SUFFIX}"
+          gh release upload "$TAG" "${package_dir}.tar.gz" "${package_dir}.tar.gz.sha256" --clobber

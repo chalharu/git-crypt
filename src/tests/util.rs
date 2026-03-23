@@ -3,6 +3,7 @@ use pgp::{
     composed::{EncryptionCaps, SecretKeyParamsBuilder},
     ser::Serialize,
 };
+use std::sync::OnceLock;
 use tempfile::TempDir;
 
 use crate::{Context, GitConfig, GitRepository};
@@ -48,7 +49,7 @@ impl TestRepositoryBuilder {
         let (private_key_data, public_key_data) =
             match (self.private_key_data, self.public_key_data) {
                 (Some(priv_data), Some(pub_data)) => (priv_data, pub_data),
-                _ => generate_keypair(),
+                _ => default_keypair(),
             };
 
         let tempdir = TempDir::new().expect("Failed to create temp dir");
@@ -116,12 +117,22 @@ pub fn generate_keypair() -> (Vec<u8>, Vec<u8>) {
     )
 }
 
+fn default_keypair() -> (Vec<u8>, Vec<u8>) {
+    static DEFAULT_KEYPAIR: OnceLock<(Vec<u8>, Vec<u8>)> = OnceLock::new();
+    let (private_key, public_key) = DEFAULT_KEYPAIR.get_or_init(generate_keypair);
+    (private_key.clone(), public_key.clone())
+}
+
 pub struct TestRepository {
     tempdir: TempDir,
     context: Context,
 }
 
 impl TestRepository {
+    pub fn into_parts(self) -> (Context, TempDir) {
+        (self.context, self.tempdir)
+    }
+
     pub fn context(&self) -> &Context {
         &self.context
     }
