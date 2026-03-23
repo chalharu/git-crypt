@@ -1,6 +1,8 @@
 use std::{path::PathBuf, str::FromStr as _};
 
-use crate::{clean, merge, smudge, tests::util::TestRepositoryBuilder};
+use crate::{
+    Error, clean, merge, parse_merge_marker_size, smudge, tests::util::TestRepositoryBuilder,
+};
 
 // 競合なしのマージ
 // Given: base, local, remote 全て別々の変更箇所
@@ -223,6 +225,27 @@ fn merge_競合あり() {
 
     // 競合あり
     assert!(!merge_status);
+}
+
+#[test]
+fn merge_marker_size_正常系() {
+    assert_eq!(parse_merge_marker_size("17").unwrap(), 17);
+}
+
+#[test]
+fn merge_marker_size_非数はエラー() {
+    assert!(matches!(
+        parse_merge_marker_size("abc"),
+        Err(Error::InvalidMarkerSize(value)) if value == "abc"
+    ));
+}
+
+#[test]
+fn merge_marker_size_範囲外はエラー() {
+    assert!(matches!(
+        parse_merge_marker_size("70000"),
+        Err(Error::InvalidMarkerSize(value)) if value == "70000"
+    ));
 }
 
 // local==remote
