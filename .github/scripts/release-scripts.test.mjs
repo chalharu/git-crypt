@@ -216,3 +216,20 @@ test("release-assets workflow is reusable or manually dispatched instead of list
 	assert.match(releaseAssetsWorkflowText, /workflow_dispatch:[\s\S]*tag:/u);
 	assert.doesNotMatch(releaseAssetsWorkflowText, /\n\s*release:\n/u);
 });
+
+test("release-assets workflow normalizes tag-like dispatch input before checkout and upload", () => {
+	assert.match(
+		releaseAssetsWorkflowText,
+		/resolve_tag:[\s\S]*RAW_TAG:\s+\$\{\{\s*inputs\.tag\s*\|\|\s*github\.event\.inputs\.tag\s*\}\}/u,
+	);
+	assert.match(releaseAssetsWorkflowText, /\$\{tag#refs\/tags\/\}/u);
+	assert.match(releaseAssetsWorkflowText, /\$\{tag#tag=\}/u);
+	assert.match(
+		releaseAssetsWorkflowText,
+		/build:[\s\S]*needs:\s+resolve_tag[\s\S]*ref:\s+\$\{\{\s*needs\.resolve_tag\.outputs\.tag\s*\}\}/u,
+	);
+	assert.match(
+		releaseAssetsWorkflowText,
+		/TAG:\s+\$\{\{\s*needs\.resolve_tag\.outputs\.tag\s*\}\}/u,
+	);
+});
