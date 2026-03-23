@@ -20,7 +20,8 @@
         "github-actions"
       ],
       "matchPackageNames": [
-        "/^(?!actions\\/|github\\/).+/"
+        "!/^actions\\//",
+        "!/^github\\//"
       ],
       "pinDigests": true
     }
