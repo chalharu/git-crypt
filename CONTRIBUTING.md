@@ -48,4 +48,6 @@ Types:
 ## 5. CI and Automerge
 
 - Renovate PRs are expected to merge through repository auto-merge after required CI checks pass.
+- First-party GitHub Actions under `actions/*` should use exact patch tags such as `v4.3.1`.
+- Third-party GitHub Actions should stay digest-pinned and be maintained by Renovate.
 - Keep branch protection aligned with the `CI` workflow so auto-merge cannot bypass validation.

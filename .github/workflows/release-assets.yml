@@ -27,7 +27,7 @@ jobs:
 
     steps:
       - name: Check out release tag
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4.3.1
         with:
           ref: ${{ github.event.release.tag_name }}
 
@@ -41,7 +41,7 @@ jobs:
           "$HOME/.cargo/bin/rustup" default stable
 
       - name: Cache Cargo dependencies
-        uses: actions/cache@v4
+        uses: actions/cache@v4.3.0
         with:
           path: |
             ~/.cargo/registry/index/
