@@ -30,7 +30,7 @@ jobs:
           "$HOME/.cargo/bin/rustup" default stable
 
       - name: Cache Cargo dependencies
-        uses: actions/cache@v4.3.0
+        uses: actions/cache@v5.0.4
         with:
           path: |
             ~/.cargo/registry/index/
