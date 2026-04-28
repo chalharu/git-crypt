@@ -6,7 +6,7 @@ rust-version = "1.85"
 
 [dependencies]
 chrono = "=0.4.44"
-clap = { version = "=4.5.61", features = ["derive"] }
+clap = { version = "=4.6.1", features = ["derive"] }
 colored = "=3.1.1"
 git2 = { version = "0.21.0", git = "https://github.com/rust-lang/git2-rs", rev = "33f0a7123084b730bb754900967e7ae7e9d94eb0" }
 hex = "=0.4.3"
