@@ -1,6 +1,6 @@
 [package]
 name = "git-crypt"
-version = "0.2.8"
+version = "0.2.9"
 edition = "2024"
 rust-version = "1.85"
 
@@ -29,6 +29,7 @@ strip = "symbols"
 
 [dev-dependencies]
 tempfile = "=3.26.0"
+
 
 
 
