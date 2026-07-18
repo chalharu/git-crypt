@@ -14,7 +14,7 @@ inquire = "=0.9.4"
 log = "=0.4.33"
 pgp = "=0.20.0"
 rand = "=0.8.7" # pgpで使われているrandのバージョンが0.8.5のため、合わせる必要がある。
-regex = "=1.13.0"
+regex = "=1.13.1"
 similar = "=3.1.1"
 stderrlog = "=0.6.0"
 sysinfo = { version = "=0.38.4", default-features = false, features = ["system", "windows"] }
